@@ -1,12 +1,13 @@
 import gym
 from gym import spaces
 import numpy as np
+from .intersection_manager import IntersectionManager
 
 class CityTrafficEnv(gym.Env):
     """
     A Gym environment simulating a city traffic grid with autonomous vehicles.
     Supports a variable number of vehicles and multi-agent actions.
-    Implements simple kinematics and collision/out-of-bounds checks.
+    Implements simple kinematics, collision/out-of-bounds checks, and intersection reservation.
     """
     metadata = {'render.modes': ['human']}
 
@@ -30,6 +31,10 @@ class CityTrafficEnv(gym.Env):
 
         self.vehicles = None  # Will hold vehicle states
         self.num_vehicles = None
+
+        # Intersection manager for the central intersection
+        self.intersection = IntersectionManager()
+        self.intersection_cell = (grid_size[0] // 2, grid_size[1] // 2)
 
     def reset(self, num_vehicles=None):
         """
@@ -68,6 +73,7 @@ class CityTrafficEnv(gym.Env):
             self.vehicles[i, 5] = np.random.randint(0, self.grid_size[1])  # route_y
             self.vehicles[i, 6] = 1  # active
         # Inactive vehicles remain at zero state
+        self.intersection = IntersectionManager()  # Reset intersection reservations
         return self._get_obs()
 
     def step(self, actions):
@@ -78,7 +84,7 @@ class CityTrafficEnv(gym.Env):
         """
         rewards = np.zeros(self.max_vehicles, dtype=np.float32)
         done = False
-        info = {"collisions": []}
+        info = {"collisions": [], "intersection_denials": []}
 
         # Parameters for kinematics
         max_speed = 5.0
@@ -140,6 +146,27 @@ class CityTrafficEnv(gym.Env):
             old_x, old_y = self.vehicles[i, 0], self.vehicles[i, 1]
             new_x = old_x + self.vehicles[i, 2] * self.dt
             new_y = old_y + self.vehicles[i, 3] * self.dt
+            # Check if vehicle is about to enter the intersection cell
+            intersection_x, intersection_y = self.intersection_cell
+            will_enter = (int(round(new_x)), int(round(new_y))) == self.intersection_cell
+            currently_in = (int(old_x), int(old_y)) == self.intersection_cell
+            if will_enter and not currently_in:
+                # Vehicle requests reservation
+                # For simplicity, direction is from (old_x, old_y) to (new_x, new_y)
+                from_dir = self._get_direction((old_x, old_y), self.intersection_cell)
+                to_dir = self._get_direction(self.intersection_cell, (self.vehicles[i, 4], self.vehicles[i, 5]))
+                arrival_time = 0 if self.dt == 0 else self.dt  # Assume immediate arrival for now
+                duration = 1.0  # Assume 1 second to cross
+                granted, slot = self.intersection.request_reservation(
+                    i, arrival_time, duration, (from_dir, to_dir)
+                )
+                if not granted:
+                    # Denied: vehicle must wait (set velocity to zero for this step)
+                    self.vehicles[i, 2] = 0
+                    self.vehicles[i, 3] = 0
+                    rewards[i] -= 0.5  # Small penalty for waiting
+                    info["intersection_denials"].append(i)
+                    continue  # Skip movement this step
             # Out-of-bounds check
             if (new_x < 0 or new_x >= self.grid_size[0] or
                 new_y < 0 or new_y >= self.grid_size[1]):
@@ -172,10 +199,23 @@ class CityTrafficEnv(gym.Env):
                 # Assign new random route
                 self.vehicles[i, 4] = np.random.randint(0, self.grid_size[0])
                 self.vehicles[i, 5] = np.random.randint(0, self.grid_size[1])
+        self.intersection.cleanup(1.0)  # Clean up old reservations (simulate time)
         # Done if all vehicles inactive
         if np.sum(self.vehicles[:, 6]) == 0:
             done = True
         return self._get_obs(), rewards, done, info
+
+    def _get_direction(self, from_pos, to_pos):
+        """
+        Returns a direction index (0=N, 1=E, 2=S, 3=W) from from_pos to to_pos.
+        """
+        dx = to_pos[0] - from_pos[0]
+        dy = to_pos[1] - from_pos[1]
+        if abs(dx) > abs(dy):
+            return 2 if dx > 0 else 0
+        elif abs(dy) > 0:
+            return 1 if dy > 0 else 3
+        return 0  # Default North
 
     def _get_obs(self):
         """
