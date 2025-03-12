@@ -2,12 +2,13 @@ import gym
 from gym import spaces
 import numpy as np
 from .intersection_manager import IntersectionManager
+from .comm_module import CommModule
 
 class CityTrafficEnv(gym.Env):
     """
     A Gym environment simulating a city traffic grid with autonomous vehicles.
     Supports a variable number of vehicles and multi-agent actions.
-    Implements simple kinematics, collision/out-of-bounds checks, and intersection reservation.
+    Implements simple kinematics, collision/out-of-bounds checks, intersection reservation, and 6G V2V/V2I communication.
     """
     metadata = {'render.modes': ['human']}
 
@@ -35,6 +36,15 @@ class CityTrafficEnv(gym.Env):
         # Intersection manager for the central intersection
         self.intersection = IntersectionManager()
         self.intersection_cell = (grid_size[0] // 2, grid_size[1] // 2)
+
+        # Communication module for V2V and V2I
+        self.comm = CommModule()
+        self.sim_time = 0.0
+
+        # Track pending intersection requests: vehicle_id -> (from_dir, to_dir, arrival_time, duration)
+        self.pending_requests = {}
+        # Track intersection responses: vehicle_id -> (granted, slot)
+        self.intersection_responses = {}
 
     def reset(self, num_vehicles=None):
         """
@@ -74,6 +84,10 @@ class CityTrafficEnv(gym.Env):
             self.vehicles[i, 6] = 1  # active
         # Inactive vehicles remain at zero state
         self.intersection = IntersectionManager()  # Reset intersection reservations
+        self.comm = CommModule()  # Reset communication
+        self.sim_time = 0.0
+        self.pending_requests = {}
+        self.intersection_responses = {}
         return self._get_obs()
 
     def step(self, actions):
@@ -84,15 +98,25 @@ class CityTrafficEnv(gym.Env):
         """
         rewards = np.zeros(self.max_vehicles, dtype=np.float32)
         done = False
-        info = {"collisions": [], "intersection_denials": []}
+        info = {"collisions": [], "intersection_denials": [], "messages_sent": 0, "messages_delivered": 0}
 
         # Parameters for kinematics
         max_speed = 5.0
         accel = 1.0  # acceleration per action
         # Directions: 0=N, 1=E, 2=S, 3=W
+
+        # 1. Vehicles broadcast their positions to all others (V2V)
         for i in range(self.num_vehicles):
             if self.vehicles[i, 6] == 0:
-                continue  # Skip inactive vehicles
+                continue
+            pos_msg = {"type": "position", "vehicle_id": i, "pos": (self.vehicles[i, 0], self.vehicles[i, 1])}
+            self.comm.broadcast(pos_msg, sender=i, recipients=range(self.num_vehicles), now=self.sim_time)
+            info["messages_sent"] += self.num_vehicles - 1
+
+        # 2. Vehicles process actions and prepare intersection requests if needed
+        for i in range(self.num_vehicles):
+            if self.vehicles[i, 6] == 0:
+                continue
             action = actions[i]
             vx, vy = self.vehicles[i, 2], self.vehicles[i, 3]
             # Determine current direction
@@ -137,36 +161,78 @@ class CityTrafficEnv(gym.Env):
                     self.vehicles[i, 2], self.vehicles[i, 3] = -abs(vy if vy != 0 else 1), 0
             # 0: stay (no change)
 
-        # Move vehicles and check for out-of-bounds
+        # 3. Vehicles that want to enter the intersection send reservation requests (V2I)
+        for i in range(self.num_vehicles):
+            if self.vehicles[i, 6] == 0:
+                continue
+            old_x, old_y = self.vehicles[i, 0], self.vehicles[i, 1]
+            vx, vy = self.vehicles[i, 2], self.vehicles[i, 3]
+            new_x = old_x + vx * self.dt
+            new_y = old_y + vy * self.dt
+            intersection_x, intersection_y = self.intersection_cell
+            will_enter = (int(round(new_x)), int(round(new_y))) == self.intersection_cell
+            currently_in = (int(old_x), int(old_y)) == self.intersection_cell
+            if will_enter and not currently_in and i not in self.pending_requests:
+                from_dir = self._get_direction((old_x, old_y), self.intersection_cell)
+                to_dir = self._get_direction(self.intersection_cell, (self.vehicles[i, 4], self.vehicles[i, 5]))
+                arrival_time = self.sim_time + self.dt  # Predict arrival next step
+                duration = 1.0
+                req_msg = {"type": "reservation_request", "vehicle_id": i, "from_dir": from_dir, "to_dir": to_dir, "arrival_time": arrival_time, "duration": duration}
+                self.comm.send(req_msg, recipient="intersection", now=self.sim_time)
+                self.pending_requests[i] = (from_dir, to_dir, arrival_time, duration)
+                info["messages_sent"] += 1
+
+        # 4. Deliver all messages whose delay has elapsed
+        delivered = self.comm.deliver_messages(self.sim_time)
+        info["messages_delivered"] = len(delivered)
+        for recipient, message in delivered:
+            if recipient == "intersection":
+                # Intersection manager processes reservation requests
+                if message["type"] == "reservation_request":
+                    vehicle_id = message["vehicle_id"]
+                    from_dir = message["from_dir"]
+                    to_dir = message["to_dir"]
+                    arrival_time = message["arrival_time"]
+                    duration = message["duration"]
+                    granted, slot = self.intersection.request_reservation(vehicle_id, arrival_time, duration, (from_dir, to_dir))
+                    resp_msg = {"type": "reservation_response", "vehicle_id": vehicle_id, "granted": granted, "slot": slot}
+                    self.comm.send(resp_msg, recipient=vehicle_id, now=self.sim_time)
+                    info["messages_sent"] += 1
+            elif isinstance(recipient, int):
+                # Vehicle receives a message
+                if message["type"] == "reservation_response":
+                    self.intersection_responses[recipient] = (message["granted"], message["slot"])
+                # V2V position messages could be used for cooperative driving, etc.
+                # (Not used in this simple example)
+
+        # 5. Move vehicles, considering intersection permissions
         positions = {}
         for i in range(self.num_vehicles):
             if self.vehicles[i, 6] == 0:
                 continue
-            # Update position using simple kinematics
             old_x, old_y = self.vehicles[i, 0], self.vehicles[i, 1]
-            new_x = old_x + self.vehicles[i, 2] * self.dt
-            new_y = old_y + self.vehicles[i, 3] * self.dt
-            # Check if vehicle is about to enter the intersection cell
+            vx, vy = self.vehicles[i, 2], self.vehicles[i, 3]
+            new_x = old_x + vx * self.dt
+            new_y = old_y + vy * self.dt
             intersection_x, intersection_y = self.intersection_cell
             will_enter = (int(round(new_x)), int(round(new_y))) == self.intersection_cell
             currently_in = (int(old_x), int(old_y)) == self.intersection_cell
             if will_enter and not currently_in:
-                # Vehicle requests reservation
-                # For simplicity, direction is from (old_x, old_y) to (new_x, new_y)
-                from_dir = self._get_direction((old_x, old_y), self.intersection_cell)
-                to_dir = self._get_direction(self.intersection_cell, (self.vehicles[i, 4], self.vehicles[i, 5]))
-                arrival_time = 0 if self.dt == 0 else self.dt  # Assume immediate arrival for now
-                duration = 1.0  # Assume 1 second to cross
-                granted, slot = self.intersection.request_reservation(
-                    i, arrival_time, duration, (from_dir, to_dir)
-                )
+                # Only move if reservation granted
+                granted = False
+                if i in self.intersection_responses:
+                    granted, slot = self.intersection_responses[i]
+                    if granted:
+                        # Remove request/response after use
+                        self.pending_requests.pop(i, None)
+                        self.intersection_responses.pop(i, None)
                 if not granted:
-                    # Denied: vehicle must wait (set velocity to zero for this step)
+                    # Denied or no response yet: vehicle must wait
                     self.vehicles[i, 2] = 0
                     self.vehicles[i, 3] = 0
-                    rewards[i] -= 0.5  # Small penalty for waiting
+                    rewards[i] -= 0.5
                     info["intersection_denials"].append(i)
-                    continue  # Skip movement this step
+                    continue
             # Out-of-bounds check
             if (new_x < 0 or new_x >= self.grid_size[0] or
                 new_y < 0 or new_y >= self.grid_size[1]):
@@ -199,7 +265,8 @@ class CityTrafficEnv(gym.Env):
                 # Assign new random route
                 self.vehicles[i, 4] = np.random.randint(0, self.grid_size[0])
                 self.vehicles[i, 5] = np.random.randint(0, self.grid_size[1])
-        self.intersection.cleanup(1.0)  # Clean up old reservations (simulate time)
+        self.intersection.cleanup(self.sim_time + self.dt)  # Clean up old reservations
+        self.sim_time += self.dt
         # Done if all vehicles inactive
         if np.sum(self.vehicles[:, 6]) == 0:
             done = True
