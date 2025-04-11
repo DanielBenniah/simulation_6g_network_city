@@ -6,128 +6,108 @@ from .comm_module import CommModule
 
 class CityTrafficEnv(gym.Env):
     """
-    A Gym environment simulating a city traffic grid with autonomous vehicles.
-    Supports a variable number of vehicles and multi-agent actions.
-    Implements simple kinematics, collision/out-of-bounds checks, intersection reservation, and 6G V2V/V2I communication.
+    Multi-agent Gym environment for city traffic with autonomous vehicles.
+    Supports single-agent (ego vs scripted) and multi-agent (all learning) modes.
+    Returns per-agent observations and rewards for multi-agent RL frameworks.
+    Implements kinematics, intersection reservation, and 6G V2V/V2I communication.
     """
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, grid_size=(10, 10), max_vehicles=10):
+    def __init__(self, grid_size=(10, 10), max_vehicles=10, multi_agent=True):
         super(CityTrafficEnv, self).__init__()
-        self.grid_size = grid_size  # (rows, cols) of the city grid
-        self.max_vehicles = max_vehicles  # Maximum number of vehicles supported
+        self.grid_size = grid_size
+        self.max_vehicles = max_vehicles
         self.n_actions = 5  # 0: stay, 1: accelerate, 2: brake, 3: turn left, 4: turn right
-        self.dt = 1.0  # Time step in seconds
+        self.dt = 1.0
+        self.multi_agent = multi_agent
 
-        # Action space: one discrete action per vehicle
-        self.action_space = spaces.MultiDiscrete([self.n_actions] * self.max_vehicles)
+        # Action/observation spaces for each agent
+        self.action_space = spaces.Discrete(self.n_actions)
+        # Observation: [x, y, vx, vy, route_x, route_y, dist_to_inter, stopped, nearby_vehicles...]
+        # We'll use 7 + 4*3 = 19 dims: self state + up to 4 nearest vehicles (x, y, vx)
+        self.obs_dim = 7 + 4*3
+        self.observation_space = spaces.Box(-np.inf, np.inf, (self.obs_dim,), dtype=np.float32)
 
-        # Observation space: for each vehicle: (x, y, vx, vy, route_x, route_y, active)
-        # x, y: position in grid; vx, vy: velocity; route_x, route_y: next route target; active: 0/1
-        obs_low = np.array([0, 0, -5, -5, 0, 0, 0] * self.max_vehicles, dtype=np.float32)
-        obs_high = np.array([
-            grid_size[0]-1, grid_size[1]-1, 5, 5, grid_size[0]-1, grid_size[1]-1, 1
-        ] * self.max_vehicles, dtype=np.float32)
-        self.observation_space = spaces.Box(obs_low, obs_high, dtype=np.float32)
-
-        self.vehicles = None  # Will hold vehicle states
+        self.vehicles = None
         self.num_vehicles = None
-
-        # Intersection manager for the central intersection
         self.intersection = IntersectionManager()
         self.intersection_cell = (grid_size[0] // 2, grid_size[1] // 2)
-
-        # Communication module for V2V and V2I
         self.comm = CommModule()
         self.sim_time = 0.0
-
-        # Track pending intersection requests: vehicle_id -> (from_dir, to_dir, arrival_time, duration)
         self.pending_requests = {}
-        # Track intersection responses: vehicle_id -> (granted, slot)
         self.intersection_responses = {}
+        self.agent_ids = None
 
     def reset(self, num_vehicles=None):
-        """
-        Reset the environment to an initial state.
-        Optionally specify the number of vehicles (default: max_vehicles).
-        Returns the initial observation.
-        """
         if num_vehicles is None:
             self.num_vehicles = self.max_vehicles
         else:
             self.num_vehicles = min(num_vehicles, self.max_vehicles)
-
-        # Vehicle state: [x, y, vx, vy, route_x, route_y, active]
+        self.agent_ids = [f"agent_{i}" for i in range(self.num_vehicles)]
         self.vehicles = np.zeros((self.max_vehicles, 7), dtype=np.float32)
         for i in range(self.num_vehicles):
-            # Random initial position
-            self.vehicles[i, 0] = np.random.randint(0, self.grid_size[0])  # x
-            self.vehicles[i, 1] = np.random.randint(0, self.grid_size[1])  # y
-            # Random initial velocity (0 or 1 in a random direction)
+            self.vehicles[i, 0] = np.random.randint(0, self.grid_size[0])
+            self.vehicles[i, 1] = np.random.randint(0, self.grid_size[1])
             direction = np.random.randint(0, 4)
             speed = np.random.randint(0, 2)
-            if direction == 0:  # North
+            if direction == 0:
                 self.vehicles[i, 2] = -speed
                 self.vehicles[i, 3] = 0
-            elif direction == 1:  # East
+            elif direction == 1:
                 self.vehicles[i, 2] = 0
                 self.vehicles[i, 3] = speed
-            elif direction == 2:  # South
+            elif direction == 2:
                 self.vehicles[i, 2] = speed
                 self.vehicles[i, 3] = 0
-            elif direction == 3:  # West
+            elif direction == 3:
                 self.vehicles[i, 2] = 0
                 self.vehicles[i, 3] = -speed
-            # Random route target (for now, just a random grid cell)
-            self.vehicles[i, 4] = np.random.randint(0, self.grid_size[0])  # route_x
-            self.vehicles[i, 5] = np.random.randint(0, self.grid_size[1])  # route_y
-            self.vehicles[i, 6] = 1  # active
-        # Inactive vehicles remain at zero state
-        self.intersection = IntersectionManager()  # Reset intersection reservations
-        self.comm = CommModule()  # Reset communication
+            self.vehicles[i, 4] = np.random.randint(0, self.grid_size[0])
+            self.vehicles[i, 5] = np.random.randint(0, self.grid_size[1])
+            self.vehicles[i, 6] = 1
+        self.intersection = IntersectionManager()
+        self.comm = CommModule()
         self.sim_time = 0.0
         self.pending_requests = {}
         self.intersection_responses = {}
-        return self._get_obs()
+        obs = self._get_all_obs()
+        if self.multi_agent:
+            return {aid: obs[i] for i, aid in enumerate(self.agent_ids)}
+        else:
+            return obs[0]
 
     def step(self, actions):
-        """
-        Take a step in the environment using the provided actions for each vehicle.
-        actions: array-like of length max_vehicles (only first num_vehicles are used)
-        Returns: obs, reward, done, info
-        """
+        # Actions: dict {agent_id: action} in multi-agent, int in single-agent
+        if self.multi_agent:
+            acts = [actions.get(aid, 0) for aid in self.agent_ids]
+        else:
+            # Ego agent is 0, others are scripted
+            acts = [actions] + [self._scripted_policy(i) for i in range(1, self.num_vehicles)]
         rewards = np.zeros(self.max_vehicles, dtype=np.float32)
         done = False
         info = {"collisions": [], "intersection_denials": [], "messages_sent": 0, "messages_delivered": 0}
-
-        # Parameters for kinematics
         max_speed = 5.0
-        accel = 1.0  # acceleration per action
-        # Directions: 0=N, 1=E, 2=S, 3=W
-
-        # 1. Vehicles broadcast their positions to all others (V2V)
+        accel = 1.0
+        # V2V broadcast
         for i in range(self.num_vehicles):
             if self.vehicles[i, 6] == 0:
                 continue
             pos_msg = {"type": "position", "vehicle_id": i, "pos": (self.vehicles[i, 0], self.vehicles[i, 1])}
             self.comm.broadcast(pos_msg, sender=i, recipients=range(self.num_vehicles), now=self.sim_time)
             info["messages_sent"] += self.num_vehicles - 1
-
-        # 2. Vehicles process actions and prepare intersection requests if needed
+        # Action application
         for i in range(self.num_vehicles):
             if self.vehicles[i, 6] == 0:
                 continue
-            action = actions[i]
+            action = acts[i]
             vx, vy = self.vehicles[i, 2], self.vehicles[i, 3]
-            # Determine current direction
             if vx == 0 and vy == 0:
                 direction = np.random.randint(0, 4)
             elif abs(vx) > abs(vy):
                 direction = 2 if vx > 0 else 0
             else:
                 direction = 1 if vy > 0 else 3
-            # Action effects
-            if action == 1:  # Accelerate
+            if action == 1:
                 if direction == 0:
                     self.vehicles[i, 2] = max(vx - accel, -max_speed)
                 elif direction == 1:
@@ -136,32 +116,30 @@ class CityTrafficEnv(gym.Env):
                     self.vehicles[i, 2] = min(vx + accel, max_speed)
                 elif direction == 3:
                     self.vehicles[i, 3] = max(vy - accel, -max_speed)
-            elif action == 2:  # Brake
+            elif action == 2:
                 if direction == 0 or direction == 2:
                     self.vehicles[i, 2] *= 0.5
                 else:
                     self.vehicles[i, 3] *= 0.5
-            elif action == 3:  # Turn left (change direction, keep speed)
-                if direction == 0:  # N -> W
+            elif action == 3:
+                if direction == 0:
                     self.vehicles[i, 2], self.vehicles[i, 3] = 0, -abs(vx if vx != 0 else 1)
-                elif direction == 1:  # E -> N
+                elif direction == 1:
                     self.vehicles[i, 2], self.vehicles[i, 3] = -abs(vy if vy != 0 else 1), 0
-                elif direction == 2:  # S -> E
+                elif direction == 2:
                     self.vehicles[i, 2], self.vehicles[i, 3] = 0, abs(vx if vx != 0 else 1)
-                elif direction == 3:  # W -> S
+                elif direction == 3:
                     self.vehicles[i, 2], self.vehicles[i, 3] = abs(vy if vy != 0 else 1), 0
-            elif action == 4:  # Turn right (change direction, keep speed)
-                if direction == 0:  # N -> E
+            elif action == 4:
+                if direction == 0:
                     self.vehicles[i, 2], self.vehicles[i, 3] = 0, abs(vx if vx != 0 else 1)
-                elif direction == 1:  # E -> S
+                elif direction == 1:
                     self.vehicles[i, 2], self.vehicles[i, 3] = abs(vy if vy != 0 else 1), 0
-                elif direction == 2:  # S -> W
+                elif direction == 2:
                     self.vehicles[i, 2], self.vehicles[i, 3] = 0, -abs(vx if vx != 0 else 1)
-                elif direction == 3:  # W -> N
+                elif direction == 3:
                     self.vehicles[i, 2], self.vehicles[i, 3] = -abs(vy if vy != 0 else 1), 0
-            # 0: stay (no change)
-
-        # 3. Vehicles that want to enter the intersection send reservation requests (V2I)
+        # Intersection requests
         for i in range(self.num_vehicles):
             if self.vehicles[i, 6] == 0:
                 continue
@@ -175,19 +153,17 @@ class CityTrafficEnv(gym.Env):
             if will_enter and not currently_in and i not in self.pending_requests:
                 from_dir = self._get_direction((old_x, old_y), self.intersection_cell)
                 to_dir = self._get_direction(self.intersection_cell, (self.vehicles[i, 4], self.vehicles[i, 5]))
-                arrival_time = self.sim_time + self.dt  # Predict arrival next step
+                arrival_time = self.sim_time + self.dt
                 duration = 1.0
                 req_msg = {"type": "reservation_request", "vehicle_id": i, "from_dir": from_dir, "to_dir": to_dir, "arrival_time": arrival_time, "duration": duration}
                 self.comm.send(req_msg, recipient="intersection", now=self.sim_time)
                 self.pending_requests[i] = (from_dir, to_dir, arrival_time, duration)
                 info["messages_sent"] += 1
-
-        # 4. Deliver all messages whose delay has elapsed
+        # Deliver messages
         delivered = self.comm.deliver_messages(self.sim_time)
         info["messages_delivered"] = len(delivered)
         for recipient, message in delivered:
             if recipient == "intersection":
-                # Intersection manager processes reservation requests
                 if message["type"] == "reservation_request":
                     vehicle_id = message["vehicle_id"]
                     from_dir = message["from_dir"]
@@ -199,13 +175,9 @@ class CityTrafficEnv(gym.Env):
                     self.comm.send(resp_msg, recipient=vehicle_id, now=self.sim_time)
                     info["messages_sent"] += 1
             elif isinstance(recipient, int):
-                # Vehicle receives a message
                 if message["type"] == "reservation_response":
                     self.intersection_responses[recipient] = (message["granted"], message["slot"])
-                # V2V position messages could be used for cooperative driving, etc.
-                # (Not used in this simple example)
-
-        # 5. Move vehicles, considering intersection permissions
+        # Move vehicles
         positions = {}
         for i in range(self.num_vehicles):
             if self.vehicles[i, 6] == 0:
@@ -217,83 +189,110 @@ class CityTrafficEnv(gym.Env):
             intersection_x, intersection_y = self.intersection_cell
             will_enter = (int(round(new_x)), int(round(new_y))) == self.intersection_cell
             currently_in = (int(old_x), int(old_y)) == self.intersection_cell
+            stopped = (vx == 0 and vy == 0)
             if will_enter and not currently_in:
-                # Only move if reservation granted
                 granted = False
                 if i in self.intersection_responses:
                     granted, slot = self.intersection_responses[i]
                     if granted:
-                        # Remove request/response after use
                         self.pending_requests.pop(i, None)
                         self.intersection_responses.pop(i, None)
                 if not granted:
-                    # Denied or no response yet: vehicle must wait
                     self.vehicles[i, 2] = 0
                     self.vehicles[i, 3] = 0
-                    rewards[i] -= 0.5
+                    rewards[i] -= 0.1  # Penalty for waiting
                     info["intersection_denials"].append(i)
                     continue
-            # Out-of-bounds check
-            if (new_x < 0 or new_x >= self.grid_size[0] or
-                new_y < 0 or new_y >= self.grid_size[1]):
-                # Out of bounds: deactivate vehicle, large penalty
+            if (new_x < 0 or new_x >= self.grid_size[0] or new_y < 0 or new_y >= self.grid_size[1]):
                 self.vehicles[i, 6] = 0
-                rewards[i] = -100
+                rewards[i] = -1  # Penalty for leaving grid
                 continue
-            # Snap to grid (discrete positions)
             self.vehicles[i, 0] = int(round(new_x))
             self.vehicles[i, 1] = int(round(new_y))
-            # Collision check
             pos = (int(self.vehicles[i, 0]), int(self.vehicles[i, 1]))
             if pos in positions:
-                # Collision: deactivate both vehicles, penalty
                 other = positions[pos]
                 self.vehicles[i, 6] = 0
                 self.vehicles[other, 6] = 0
-                rewards[i] = -50
-                rewards[other] = -50
+                rewards[i] = -1  # Collision penalty
+                rewards[other] = -1
                 info["collisions"].append((i, other, pos))
             else:
                 positions[pos] = i
-            # Reward for moving closer to route target
             route_x, route_y = self.vehicles[i, 4], self.vehicles[i, 5]
             dist = np.linalg.norm([self.vehicles[i, 0] - route_x, self.vehicles[i, 1] - route_y])
-            rewards[i] += -dist * 0.1
-            # Reward for reaching route target
+            rewards[i] += -0.01 * dist
+            if stopped:
+                rewards[i] -= 0.1  # Penalty for being stopped
             if self.vehicles[i, 0] == route_x and self.vehicles[i, 1] == route_y:
-                rewards[i] += 20
-                # Assign new random route
+                rewards[i] += 1  # Reward for reaching destination
                 self.vehicles[i, 4] = np.random.randint(0, self.grid_size[0])
                 self.vehicles[i, 5] = np.random.randint(0, self.grid_size[1])
-        self.intersection.cleanup(self.sim_time + self.dt)  # Clean up old reservations
+        self.intersection.cleanup(self.sim_time + self.dt)
         self.sim_time += self.dt
-        # Done if all vehicles inactive
-        if np.sum(self.vehicles[:, 6]) == 0:
-            done = True
-        return self._get_obs(), rewards, done, info
+        done = np.sum(self.vehicles[:, 6]) == 0
+        obs = self._get_all_obs()
+        if self.multi_agent:
+            rew = {aid: rewards[i] for i, aid in enumerate(self.agent_ids)}
+            obs_dict = {aid: obs[i] for i, aid in enumerate(self.agent_ids)}
+            done_dict = {aid: done for aid in self.agent_ids}
+            info_dict = {aid: info for aid in self.agent_ids}
+            return obs_dict, rew, done_dict, info_dict
+        else:
+            return obs[0], rewards[0], done, info
+
+    def _get_all_obs(self):
+        # For each vehicle, return [x, y, vx, vy, route_x, route_y, dist_to_inter, stopped, ...nearest_vehicles]
+        obs = np.zeros((self.num_vehicles, self.obs_dim), dtype=np.float32)
+        for i in range(self.num_vehicles):
+            x, y, vx, vy, rx, ry, active = self.vehicles[i]
+            dist_to_inter = np.linalg.norm([x - self.intersection_cell[0], y - self.intersection_cell[1]])
+            stopped = float(vx == 0 and vy == 0)
+            obs[i, :7] = [x, y, vx, vy, rx, ry, dist_to_inter]
+            obs[i, 7] = stopped
+            # Find up to 4 nearest vehicles (excluding self)
+            dists = []
+            for j in range(self.num_vehicles):
+                if j == i or self.vehicles[j, 6] == 0:
+                    continue
+                dx, dy = self.vehicles[j, 0] - x, self.vehicles[j, 1] - y
+                dist = np.hypot(dx, dy)
+                dists.append((dist, j))
+            dists.sort()
+            for k in range(4):
+                if k < len(dists):
+                    _, j = dists[k]
+                    obs[i, 8 + k*3:8 + (k+1)*3] = self.vehicles[j, :3]  # x, y, vx
+                else:
+                    obs[i, 8 + k*3:8 + (k+1)*3] = 0
+        return obs
+
+    def _scripted_policy(self, i):
+        # Simple scripted policy: go toward route target
+        x, y, vx, vy, rx, ry, active = self.vehicles[i]
+        if vx == 0 and vy == 0:
+            if rx > x:
+                return 1  # accelerate south
+            elif rx < x:
+                return 1  # accelerate north
+            elif ry > y:
+                return 1  # accelerate east
+            elif ry < y:
+                return 1  # accelerate west
+            else:
+                return 0  # stay
+        return 0  # stay
 
     def _get_direction(self, from_pos, to_pos):
-        """
-        Returns a direction index (0=N, 1=E, 2=S, 3=W) from from_pos to to_pos.
-        """
         dx = to_pos[0] - from_pos[0]
         dy = to_pos[1] - from_pos[1]
         if abs(dx) > abs(dy):
             return 2 if dx > 0 else 0
         elif abs(dy) > 0:
             return 1 if dy > 0 else 3
-        return 0  # Default North
-
-    def _get_obs(self):
-        """
-        Returns the flattened observation for all vehicles (including inactive).
-        """
-        return self.vehicles.flatten()
+        return 0
 
     def render(self, mode='human'):
-        """
-        Render the environment (optional, simple text output).
-        """
         grid = np.full(self.grid_size, '.', dtype=str)
         for i in range(self.num_vehicles):
             if self.vehicles[i, 6] == 1:
