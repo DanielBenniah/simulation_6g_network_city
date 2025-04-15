@@ -6,6 +6,11 @@ from stable_baselines3.common.evaluation import evaluate_policy
 import os
 import sys
 import time
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
 
 # Import the environment
 from city_traffic_env import CityTrafficEnv
@@ -34,28 +39,76 @@ def main():
     if os.path.exists(log_file):
         os.remove(log_file)
 
+    # TensorBoard writer
+    writer = SummaryWriter() if TENSORBOARD_AVAILABLE else None
+
     for step in range(0, total_timesteps, eval_freq):
         model.learn(total_timesteps=eval_freq, reset_num_timesteps=False)
         # Evaluate
-        rewards, collisions = [], []
+        rewards, collisions, travel_times, throughputs, waiting_times, near_misses = [], [], [], [], [], []
         for _ in range(n_eval_episodes):
             obs = env.reset()
             done = False
             ep_reward = 0
             ep_collisions = 0
+            ep_travel_time = 0
+            ep_throughput = 0
+            ep_waiting_time = 0
+            ep_near_miss = 0
+            # For travel time and waiting time tracking
+            vehicle_steps = [0 for _ in range(env.num_vehicles)]
+            vehicle_waiting = [0 for _ in range(env.num_vehicles)]
+            vehicle_reached = [0 for _ in range(env.num_vehicles)]
             while not done:
                 action, _ = model.predict(obs, deterministic=True)
                 obs, reward, done, info = env.step(action)
                 ep_reward += reward
-                if 'collisions' in info and info['collisions']:
-                    ep_collisions += len(info['collisions'])
+                ep_collisions += len(info['collisions']) if 'collisions' in info else 0
+                # Track per-vehicle travel time and waiting
+                for i in range(env.num_vehicles):
+                    vehicle_steps[i] += 1
+                    # If vehicle is stopped (vx==0 and vy==0), count as waiting
+                    vx, vy = env.vehicles[i, 2], env.vehicles[i, 3]
+                    if vx == 0 and vy == 0:
+                        vehicle_waiting[i] += 1
+                # Throughput: count vehicles reaching destination (reward +1)
+                if reward >= 1:
+                    ep_throughput += 1
+                # Near-miss: if two vehicles are within 1 cell but not colliding
+                positions = [(int(env.vehicles[i, 0]), int(env.vehicles[i, 1])) for i in range(env.num_vehicles) if env.vehicles[i, 6] == 1]
+                for i in range(len(positions)):
+                    for j in range(i+1, len(positions)):
+                        if abs(positions[i][0] - positions[j][0]) + abs(positions[i][1] - positions[j][1]) == 1:
+                            ep_near_miss += 1
+            # Average travel time for vehicles still active
+            avg_travel_time = np.mean([vehicle_steps[i] for i in range(env.num_vehicles) if env.vehicles[i, 6] == 1]) if any(env.vehicles[:,6]==1) else 0
+            avg_waiting_time = np.mean(vehicle_waiting)
             rewards.append(ep_reward)
             collisions.append(ep_collisions)
+            travel_times.append(avg_travel_time)
+            throughputs.append(ep_throughput)
+            waiting_times.append(avg_waiting_time)
+            near_misses.append(ep_near_miss)
         avg_reward = np.mean(rewards)
         avg_collisions = np.mean(collisions)
-        print(f"Step {step+eval_freq}: Avg Reward {avg_reward:.2f}, Avg Collisions {avg_collisions:.2f}")
+        avg_travel_time = np.mean(travel_times)
+        avg_throughput = np.mean(throughputs)
+        avg_waiting_time = np.mean(waiting_times)
+        avg_near_miss = np.mean(near_misses)
+        print(f"Step {step+eval_freq}: Avg Reward {avg_reward:.2f}, Avg Collisions {avg_collisions:.2f}, "
+              f"Avg Travel Time {avg_travel_time:.2f}, Avg Throughput {avg_throughput:.2f}, "
+              f"Avg Waiting {avg_waiting_time:.2f}, Avg Near-Miss {avg_near_miss:.2f}")
         with open(log_file, "a") as f:
-            f.write(f"{step+eval_freq},{avg_reward},{avg_collisions}\n")
+            f.write(f"{step+eval_freq},{avg_reward},{avg_collisions},{avg_travel_time},{avg_throughput},{avg_waiting_time},{avg_near_miss}\n")
+        if writer:
+            writer.add_scalar("Reward/Avg", avg_reward, step+eval_freq)
+            writer.add_scalar("Collisions/Avg", avg_collisions, step+eval_freq)
+            writer.add_scalar("TravelTime/Avg", avg_travel_time, step+eval_freq)
+            writer.add_scalar("Throughput/Avg", avg_throughput, step+eval_freq)
+            writer.add_scalar("WaitingTime/Avg", avg_waiting_time, step+eval_freq)
+            writer.add_scalar("NearMiss/Avg", avg_near_miss, step+eval_freq)
+    if writer:
+        writer.close()
 
     # Save the trained model
     model.save("ppo_city_traffic")
