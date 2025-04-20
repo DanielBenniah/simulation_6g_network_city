@@ -3,6 +3,7 @@ from gym import spaces
 import numpy as np
 from .intersection_manager import IntersectionManager
 from .comm_module import CommModule
+import matplotlib.pyplot as plt
 
 class CityTrafficEnv(gym.Env):
     """
@@ -293,9 +294,46 @@ class CityTrafficEnv(gym.Env):
         return 0
 
     def render(self, mode='human'):
-        grid = np.full(self.grid_size, '.', dtype=str)
+        """
+        Visualize the grid and vehicles using Matplotlib (mode='human' or 'plot').
+        For mode='text', print a text-based grid.
+        """
+        if mode == 'text':
+            grid = np.full(self.grid_size, '.', dtype=str)
+            for i in range(self.num_vehicles):
+                if self.vehicles[i, 6] == 1:
+                    x, y = int(self.vehicles[i, 0]), int(self.vehicles[i, 1])
+                    grid[x, y] = str(i)
+            print("\n".join([" ".join(row) for row in grid]))
+            return
+        # Matplotlib visualization
+        plt.figure(figsize=(6, 6))
+        ax = plt.gca()
+        # Draw grid lines
+        for x in range(self.grid_size[0]+1):
+            ax.plot([x-0.5, x-0.5], [-0.5, self.grid_size[1]-0.5], color='gray', linewidth=0.5)
+        for y in range(self.grid_size[1]+1):
+            ax.plot([-0.5, self.grid_size[0]-0.5], [y-0.5, y-0.5], color='gray', linewidth=0.5)
+        # Draw intersection cell
+        ix, iy = self.intersection_cell
+        ax.add_patch(plt.Rectangle((iy-0.5, ix-0.5), 1, 1, color='yellow', alpha=0.3, zorder=0, label='Intersection'))
+        # Draw vehicles
+        colors = plt.cm.tab10.colors
         for i in range(self.num_vehicles):
             if self.vehicles[i, 6] == 1:
-                x, y = int(self.vehicles[i, 0]), int(self.vehicles[i, 1])
-                grid[x, y] = str(i)
-        print("\n".join([" ".join(row) for row in grid])) 
+                x, y = self.vehicles[i, 0], self.vehicles[i, 1]
+                ax.scatter(y, x, s=200, color=colors[i % 10], label=f'Vehicle {i}' if i < 10 else None, edgecolor='k', zorder=2)
+        # Legend (only for first 10 vehicles)
+        handles, labels = ax.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        ax.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize='small')
+        ax.set_xlim(-0.5, self.grid_size[1]-0.5)
+        ax.set_ylim(self.grid_size[0]-0.5, -0.5)
+        ax.set_aspect('equal')
+        ax.set_xticks(range(self.grid_size[1]))
+        ax.set_yticks(range(self.grid_size[0]))
+        ax.set_xlabel('Y (East-West)')
+        ax.set_ylabel('X (North-South)')
+        ax.set_title('City Traffic Simulation')
+        plt.tight_layout()
+        plt.show() 
