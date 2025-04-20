@@ -12,7 +12,7 @@ try:
 except ImportError:
     TENSORBOARD_AVAILABLE = False
 
-# Import the environment
+import matplotlib.pyplot as plt
 from city_traffic_env import CityTrafficEnv
 
 # --- Training script for CityTrafficEnv using Stable Baselines3 PPO ---
@@ -23,6 +23,32 @@ def make_env():
     # Use single-agent mode: agent 0 is learning, others are scripted
     env = CityTrafficEnv(grid_size=(10, 10), max_vehicles=5, multi_agent=False)
     return env
+
+def plot_metrics(metrics_log):
+    """
+    Plot average reward and number of collisions per episode over time.
+    metrics_log: path to the log file (CSV with columns: step, avg_reward, avg_collisions, ...)
+    """
+    steps, rewards, collisions = [], [], []
+    with open(metrics_log, 'r') as f:
+        for line in f:
+            parts = line.strip().split(',')
+            if len(parts) < 3:
+                continue
+            step, avg_reward, avg_collisions = int(parts[0]), float(parts[1]), float(parts[2])
+            steps.append(step)
+            rewards.append(avg_reward)
+            collisions.append(avg_collisions)
+    plt.figure(figsize=(10,5))
+    plt.plot(steps, rewards, label='Avg Reward per Episode', marker='o')
+    plt.plot(steps, collisions, label='Avg Collisions per Episode', marker='x')
+    plt.xlabel('Training Step')
+    plt.ylabel('Value')
+    plt.title('Training Progress: Reward and Collisions')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
 
 def main():
     env = make_env()
@@ -117,6 +143,9 @@ def main():
     # Final evaluation
     mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=10)
     print(f"Final evaluation: mean_reward={mean_reward:.2f} +/- {std_reward:.2f}")
+
+    # Plot metrics after training
+    plot_metrics(log_file)
 
 if __name__ == "__main__":
     main()
