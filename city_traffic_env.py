@@ -14,21 +14,17 @@ class CityTrafficEnv(gym.Env):
     """
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, grid_size=(10, 10), max_vehicles=10, multi_agent=True):
+    def __init__(self, grid_size=(10, 10), max_vehicles=10, multi_agent=True, debug=False):
         super(CityTrafficEnv, self).__init__()
         self.grid_size = grid_size
         self.max_vehicles = max_vehicles
         self.n_actions = 5  # 0: stay, 1: accelerate, 2: brake, 3: turn left, 4: turn right
         self.dt = 1.0
         self.multi_agent = multi_agent
-
-        # Action/observation spaces for each agent
+        self.debug = debug  # Debug flag for verbose output
         self.action_space = spaces.Discrete(self.n_actions)
-        # Observation: [x, y, vx, vy, route_x, route_y, dist_to_inter, stopped, nearby_vehicles...]
-        # We'll use 7 + 4*3 = 19 dims: self state + up to 4 nearest vehicles (x, y, vx)
         self.obs_dim = 7 + 4*3
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.obs_dim,), dtype=np.float32)
-
         self.vehicles = None
         self.num_vehicles = None
         self.intersection = IntersectionManager()
@@ -78,11 +74,9 @@ class CityTrafficEnv(gym.Env):
             return obs[0]
 
     def step(self, actions):
-        # Actions: dict {agent_id: action} in multi-agent, int in single-agent
         if self.multi_agent:
             acts = [actions.get(aid, 0) for aid in self.agent_ids]
         else:
-            # Ego agent is 0, others are scripted
             acts = [actions] + [self._scripted_policy(i) for i in range(1, self.num_vehicles)]
         rewards = np.zeros(self.max_vehicles, dtype=np.float32)
         done = False
@@ -108,6 +102,8 @@ class CityTrafficEnv(gym.Env):
                 direction = 2 if vx > 0 else 0
             else:
                 direction = 1 if vy > 0 else 3
+            if self.debug:
+                print(f"[DEBUG] Vehicle {i}: pos=({self.vehicles[i,0]:.1f},{self.vehicles[i,1]:.1f}) action={action} vel=({vx:.1f},{vy:.1f})")
             if action == 1:
                 if direction == 0:
                     self.vehicles[i, 2] = max(vx - accel, -max_speed)
@@ -156,6 +152,8 @@ class CityTrafficEnv(gym.Env):
                 to_dir = self._get_direction(self.intersection_cell, (self.vehicles[i, 4], self.vehicles[i, 5]))
                 arrival_time = self.sim_time + self.dt
                 duration = 1.0
+                if self.debug:
+                    print(f"[DEBUG] Vehicle {i} requests intersection: from {from_dir} to {to_dir} at t={arrival_time:.1f}")
                 req_msg = {"type": "reservation_request", "vehicle_id": i, "from_dir": from_dir, "to_dir": to_dir, "arrival_time": arrival_time, "duration": duration}
                 self.comm.send(req_msg, recipient="intersection", now=self.sim_time)
                 self.pending_requests[i] = (from_dir, to_dir, arrival_time, duration)
@@ -172,6 +170,8 @@ class CityTrafficEnv(gym.Env):
                     arrival_time = message["arrival_time"]
                     duration = message["duration"]
                     granted, slot = self.intersection.request_reservation(vehicle_id, arrival_time, duration, (from_dir, to_dir))
+                    if self.debug:
+                        print(f"[DEBUG] IntersectionManager: Vehicle {vehicle_id} reservation {'GRANTED' if granted else 'DENIED'} for t={arrival_time:.1f}")
                     resp_msg = {"type": "reservation_response", "vehicle_id": vehicle_id, "granted": granted, "slot": slot}
                     self.comm.send(resp_msg, recipient=vehicle_id, now=self.sim_time)
                     info["messages_sent"] += 1
