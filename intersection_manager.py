@@ -6,22 +6,32 @@ class IntersectionManager:
     Vehicles request to enter by providing approach parameters (arrival_time, speed, direction).
     The manager grants a reservation (time slot and path) if no conflict exists, otherwise asks the vehicle to slow/stop.
     Uses a first-come-first-served strategy.
+
+    Notes:
+        - Time is in seconds.
+        - Paths are tuples (from_dir, to_dir) with directions as ints (0=N,1=E,2=S,3=W).
+        - Assumes all vehicles take the same time to cross (duration).
     """
     def __init__(self):
+        """
+        Initialize the IntersectionManager.
+        """
         # Each reservation: (start_time, end_time, vehicle_id, path)
         self.reservations = []  # List of (start_time, end_time, vehicle_id, path)
 
     def request_reservation(self, vehicle_id, arrival_time, duration, path):
         """
         Request a reservation for a vehicle to pass through the intersection.
+
         Args:
-            vehicle_id: Unique identifier for the vehicle.
-            arrival_time: Proposed entry time to the intersection.
-            duration: Time to cross the intersection.
-            path: Path through the intersection (e.g., (from_dir, to_dir)).
+            vehicle_id (int): Unique identifier for the vehicle.
+            arrival_time (float): Proposed entry time to the intersection (seconds).
+            duration (float): Time to cross the intersection (seconds).
+            path (tuple): Path through the intersection (from_dir, to_dir).
         Returns:
-            granted: True if reservation is granted, False otherwise.
-            slot: (start_time, end_time) if granted, else suggested new time.
+            tuple: (granted, slot)
+                granted (bool): True if reservation is granted, False otherwise.
+                slot: (start_time, end_time) if granted, else suggested new time.
         """
         start_time = arrival_time
         end_time = arrival_time + duration
@@ -40,17 +50,19 @@ class IntersectionManager:
     def paths_conflict(self, path1, path2):
         """
         Returns True if two paths through the intersection would conflict (i.e., could collide).
-        For simplicity, any crossing or same path is a conflict.
-        path: (from_dir, to_dir), e.g., (0, 1) for North to East.
+
+        Args:
+            path1 (tuple): (from_dir, to_dir) for vehicle 1.
+            path2 (tuple): (from_dir, to_dir) for vehicle 2.
+        Returns:
+            bool: True if the paths conflict, False otherwise.
+        Notes:
+            - For simplicity, any crossing or same path is a conflict.
         """
-        # If paths are the same or cross, consider conflict
         if path1 == path2:
             return True
-        # For simplicity, all left turns, straight, and right turns can conflict if not orthogonal
-        # (This can be made more sophisticated)
         if path1[0] == path2[0] or path1[1] == path2[1]:
             return True
-        # Diagonal crossing (e.g., N->E and E->N) can also conflict
         if path1[0] == path2[1] and path1[1] == path2[0]:
             return True
         return False
@@ -58,6 +70,9 @@ class IntersectionManager:
     def cleanup(self, current_time):
         """
         Remove expired reservations (where end_time < current_time).
+
+        Args:
+            current_time (float): Current simulation time (seconds).
         """
         self.reservations = [res for res in self.reservations if res[1] > current_time]
         heapq.heapify(self.reservations)
@@ -65,5 +80,8 @@ class IntersectionManager:
     def get_reservations(self):
         """
         Return a list of current reservations for inspection or debugging.
+
+        Returns:
+            list: List of (start_time, end_time, vehicle_id, path) tuples.
         """
         return list(self.reservations) 

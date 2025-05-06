@@ -7,21 +7,48 @@ import matplotlib.pyplot as plt
 
 class CityTrafficEnv(gym.Env):
     """
-    Multi-agent Gym environment for city traffic with autonomous vehicles.
-    Supports single-agent (ego vs scripted) and multi-agent (all learning) modes.
-    Returns per-agent observations and rewards for multi-agent RL frameworks.
-    Implements kinematics, intersection reservation, and 6G V2V/V2I communication.
+    Multi-agent Gym environment for simulating city traffic with autonomous vehicles.
+
+    Supports both single-agent (ego vs scripted) and multi-agent (all learning) modes.
+    Vehicles move on a grid, interact at intersections via a reservation system, and communicate using a simulated 6G V2V/V2I network.
+
+    Parameters:
+        grid_size (tuple): Size of the city grid (rows, cols).
+        max_vehicles (int): Maximum number of vehicles in the environment.
+        multi_agent (bool): If True, all vehicles are learning agents; if False, only agent 0 is learning.
+        debug (bool): If True, prints detailed debug information each step.
+
+    Observation:
+        For each agent: [x, y, vx, vy, route_x, route_y, dist_to_inter, stopped, ...nearest_vehicles]
+        Units: positions in grid cells, velocities in cells/step, distances in cells.
+
+    Action:
+        Discrete(5): 0=stay, 1=accelerate, 2=brake, 3=turn left, 4=turn right
+
+    Notes:
+        - Time step is 1.0 second per step.
+        - Communications are simulated with delay and drop probability (see CommModule).
+        - Intersection reservations are managed by IntersectionManager.
     """
     metadata = {'render.modes': ['human']}
 
     def __init__(self, grid_size=(10, 10), max_vehicles=10, multi_agent=True, debug=False):
+        """
+        Initialize the CityTrafficEnv.
+
+        Args:
+            grid_size (tuple): Size of the city grid (rows, cols).
+            max_vehicles (int): Maximum number of vehicles.
+            multi_agent (bool): Multi-agent mode flag.
+            debug (bool): Enable debug printouts if True.
+        """
         super(CityTrafficEnv, self).__init__()
         self.grid_size = grid_size
         self.max_vehicles = max_vehicles
         self.n_actions = 5  # 0: stay, 1: accelerate, 2: brake, 3: turn left, 4: turn right
         self.dt = 1.0
         self.multi_agent = multi_agent
-        self.debug = debug  # Debug flag for verbose output
+        self.debug = debug
         self.action_space = spaces.Discrete(self.n_actions)
         self.obs_dim = 7 + 4*3
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.obs_dim,), dtype=np.float32)
@@ -36,6 +63,15 @@ class CityTrafficEnv(gym.Env):
         self.agent_ids = None
 
     def reset(self, num_vehicles=None):
+        """
+        Reset the environment to an initial state.
+
+        Args:
+            num_vehicles (int, optional): Number of vehicles to initialize. Defaults to max_vehicles.
+
+        Returns:
+            dict or np.ndarray: Initial observations for each agent (dict) or single agent (array).
+        """
         if num_vehicles is None:
             self.num_vehicles = self.max_vehicles
         else:
@@ -74,6 +110,22 @@ class CityTrafficEnv(gym.Env):
             return obs[0]
 
     def step(self, actions):
+        """
+        Advance the simulation by one time step.
+
+        Args:
+            actions (dict or int): Actions for each agent (dict) or single agent (int).
+
+        Returns:
+            tuple: (obs, rewards, done, info) where:
+                obs: dict or np.ndarray, observations for each agent or single agent.
+                rewards: dict or float, rewards for each agent or single agent.
+                done: dict or bool, done flags for each agent or single agent.
+                info: dict, additional info for each agent or single agent.
+        Notes:
+            - Handles vehicle kinematics, intersection reservations, collisions, and communication.
+            - Rewards are shaped for safety and efficiency.
+        """
         if self.multi_agent:
             acts = [actions.get(aid, 0) for aid in self.agent_ids]
         else:
@@ -243,6 +295,12 @@ class CityTrafficEnv(gym.Env):
             return obs[0], rewards[0], done, info
 
     def _get_all_obs(self):
+        """
+        Compute observations for all vehicles.
+
+        Returns:
+            np.ndarray: Array of shape (num_vehicles, obs_dim) with each agent's observation.
+        """
         # For each vehicle, return [x, y, vx, vy, route_x, route_y, dist_to_inter, stopped, ...nearest_vehicles]
         obs = np.zeros((self.num_vehicles, self.obs_dim), dtype=np.float32)
         for i in range(self.num_vehicles):
@@ -269,7 +327,15 @@ class CityTrafficEnv(gym.Env):
         return obs
 
     def _scripted_policy(self, i):
-        # Simple scripted policy: go toward route target
+        """
+        Simple scripted policy for non-learning vehicles.
+        Moves toward the route target if stopped, otherwise stays.
+
+        Args:
+            i (int): Vehicle index.
+        Returns:
+            int: Action to take (0-4).
+        """
         x, y, vx, vy, rx, ry, active = self.vehicles[i]
         if vx == 0 and vy == 0:
             if rx > x:
@@ -285,6 +351,15 @@ class CityTrafficEnv(gym.Env):
         return 0  # stay
 
     def _get_direction(self, from_pos, to_pos):
+        """
+        Compute the direction index from one position to another.
+
+        Args:
+            from_pos (tuple): (x, y) start position.
+            to_pos (tuple): (x, y) target position.
+        Returns:
+            int: Direction index (0=N, 1=E, 2=S, 3=W).
+        """
         dx = to_pos[0] - from_pos[0]
         dy = to_pos[1] - from_pos[1]
         if abs(dx) > abs(dy):
@@ -295,8 +370,13 @@ class CityTrafficEnv(gym.Env):
 
     def render(self, mode='human'):
         """
-        Visualize the grid and vehicles using Matplotlib (mode='human' or 'plot').
-        For mode='text', print a text-based grid.
+        Visualize the grid and vehicles.
+
+        Args:
+            mode (str): 'human' or 'plot' for Matplotlib, 'text' for ASCII grid.
+        Notes:
+            - Vehicles are shown as colored circles, intersection is highlighted.
+            - For animation, call repeatedly in a loop.
         """
         if mode == 'text':
             grid = np.full(self.grid_size, '.', dtype=str)
