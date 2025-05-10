@@ -1,8 +1,8 @@
-import gym
-from gym import spaces
+import gymnasium as gym
+from gymnasium import spaces
 import numpy as np
-from .intersection_manager import IntersectionManager
-from .comm_module import CommModule
+from intersection_manager import IntersectionManager
+from comm_module import CommModule
 import matplotlib.pyplot as plt
 
 class CityTrafficEnv(gym.Env):
@@ -19,8 +19,8 @@ class CityTrafficEnv(gym.Env):
         debug (bool): If True, prints detailed debug information each step.
 
     Observation:
-        For each agent: [x, y, vx, vy, route_x, route_y, dist_to_inter, stopped, ...nearest_vehicles]
-        Units: positions in grid cells, velocities in cells/step, distances in cells.
+        [x, y, vx, vy, route_x, route_y, dist_to_inter, stopped, ...nearest_vehicles]
+        We'll use 7 + 1 + 4*3 = 20 dims: self state (7), stopped (1), up to 4 nearest vehicles (x, y, vx)
 
     Action:
         Discrete(5): 0=stay, 1=accelerate, 2=brake, 3=turn left, 4=turn right
@@ -50,7 +50,7 @@ class CityTrafficEnv(gym.Env):
         self.multi_agent = multi_agent
         self.debug = debug
         self.action_space = spaces.Discrete(self.n_actions)
-        self.obs_dim = 7 + 4*3
+        self.obs_dim = 7 + 1 + 4*3
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.obs_dim,), dtype=np.float32)
         self.vehicles = None
         self.num_vehicles = None
@@ -62,16 +62,20 @@ class CityTrafficEnv(gym.Env):
         self.intersection_responses = {}
         self.agent_ids = None
 
-    def reset(self, num_vehicles=None):
+    def reset(self, num_vehicles=None, seed=None, **kwargs):
         """
         Reset the environment to an initial state.
 
         Args:
             num_vehicles (int, optional): Number of vehicles to initialize. Defaults to max_vehicles.
+            seed (int, optional): Random seed for reproducibility.
+            **kwargs: Additional arguments for compatibility.
 
         Returns:
-            dict or np.ndarray: Initial observations for each agent (dict) or single agent (array).
+            tuple: (obs, info) where obs is the initial observation(s) and info is a dict.
         """
+        if seed is not None:
+            np.random.seed(seed)
         if num_vehicles is None:
             self.num_vehicles = self.max_vehicles
         else:
@@ -104,10 +108,11 @@ class CityTrafficEnv(gym.Env):
         self.pending_requests = {}
         self.intersection_responses = {}
         obs = self._get_all_obs()
+        info = {}
         if self.multi_agent:
-            return {aid: obs[i] for i, aid in enumerate(self.agent_ids)}
+            return {aid: obs[i] for i, aid in enumerate(self.agent_ids)}, info
         else:
-            return obs[0]
+            return obs[0], info
 
     def step(self, actions):
         """
@@ -117,10 +122,11 @@ class CityTrafficEnv(gym.Env):
             actions (dict or int): Actions for each agent (dict) or single agent (int).
 
         Returns:
-            tuple: (obs, rewards, done, info) where:
+            tuple: (obs, reward, terminated, truncated, info) where:
                 obs: dict or np.ndarray, observations for each agent or single agent.
-                rewards: dict or float, rewards for each agent or single agent.
-                done: dict or bool, done flags for each agent or single agent.
+                reward: dict or float, rewards for each agent or single agent.
+                terminated: dict or bool, terminated flags for each agent or single agent.
+                truncated: dict or bool, truncated flags for each agent or single agent.
                 info: dict, additional info for each agent or single agent.
         Notes:
             - Handles vehicle kinematics, intersection reservations, collisions, and communication.
@@ -131,7 +137,8 @@ class CityTrafficEnv(gym.Env):
         else:
             acts = [actions] + [self._scripted_policy(i) for i in range(1, self.num_vehicles)]
         rewards = np.zeros(self.max_vehicles, dtype=np.float32)
-        done = False
+        terminated = False
+        truncated = False
         info = {"collisions": [], "intersection_denials": [], "messages_sent": 0, "messages_delivered": 0}
         max_speed = 5.0
         accel = 1.0
@@ -283,16 +290,18 @@ class CityTrafficEnv(gym.Env):
                 self.vehicles[i, 5] = np.random.randint(0, self.grid_size[1])
         self.intersection.cleanup(self.sim_time + self.dt)
         self.sim_time += self.dt
-        done = np.sum(self.vehicles[:, 6]) == 0
+        # Check if episode is done (all vehicles inactive)
+        terminated = np.sum(self.vehicles[:, 6]) == 0
         obs = self._get_all_obs()
         if self.multi_agent:
             rew = {aid: rewards[i] for i, aid in enumerate(self.agent_ids)}
             obs_dict = {aid: obs[i] for i, aid in enumerate(self.agent_ids)}
-            done_dict = {aid: done for aid in self.agent_ids}
+            terminated_dict = {aid: terminated for aid in self.agent_ids}
+            truncated_dict = {aid: truncated for aid in self.agent_ids}
             info_dict = {aid: info for aid in self.agent_ids}
-            return obs_dict, rew, done_dict, info_dict
+            return obs_dict, rew, terminated_dict, truncated_dict, info_dict
         else:
-            return obs[0], rewards[0], done, info
+            return obs[0], float(rewards[0]), bool(terminated), bool(truncated), info
 
     def _get_all_obs(self):
         """
@@ -301,6 +310,10 @@ class CityTrafficEnv(gym.Env):
         Returns:
             np.ndarray: Array of shape (num_vehicles, obs_dim) with each agent's observation.
         """
+        # Handle edge case where no vehicles exist
+        if self.num_vehicles == 0:
+            return np.zeros((0, self.obs_dim), dtype=np.float32)
+        
         # For each vehicle, return [x, y, vx, vy, route_x, route_y, dist_to_inter, stopped, ...nearest_vehicles]
         obs = np.zeros((self.num_vehicles, self.obs_dim), dtype=np.float32)
         for i in range(self.num_vehicles):
