@@ -18,7 +18,7 @@ class HighwayTrafficEnv(gym.Env):
     - Realistic continuous traffic flow
     """
     
-    def __init__(self, grid_size=(12, 12), max_vehicles=16, spawn_rate=0.15, debug=False):
+    def __init__(self, grid_size=(12, 12), max_vehicles=24, spawn_rate=0.4, debug=False):
         super(HighwayTrafficEnv, self).__init__()
         self.grid_size = grid_size
         self.max_vehicles = max_vehicles
@@ -42,6 +42,8 @@ class HighwayTrafficEnv(gym.Env):
         self.vehicles = None
         self.vehicle_count = 0
         self.sim_time = 0.0
+        self.vehicle_spawn_times = {}  # Track when each vehicle was spawned
+        self.journey_times = []  # Track completed journey times
         
         # Spawn zones (edges of grid)
         self.spawn_zones = {
@@ -61,9 +63,11 @@ class HighwayTrafficEnv(gym.Env):
         self.vehicles = np.zeros((self.max_vehicles, 8), dtype=np.float32)
         self.vehicle_count = 0
         self.sim_time = 0.0
+        self.vehicle_spawn_times = {}
+        self.journey_times = []
         
         # Spawn initial vehicles
-        initial_vehicles = min(8, self.max_vehicles // 2)
+        initial_vehicles = min(12, self.max_vehicles // 2)
         for _ in range(initial_vehicles):
             self._spawn_vehicle()
         
@@ -121,6 +125,10 @@ class HighwayTrafficEnv(gym.Env):
         
         # Store vehicle data
         self.vehicles[vehicle_idx] = [x, y, vx, vy, direction_code, 1, self.vehicle_count, lane_offset]
+        
+        # Track spawn time for journey time calculation
+        self.vehicle_spawn_times[self.vehicle_count] = self.sim_time
+        
         self.vehicle_count += 1
         
         if self.debug:
@@ -264,8 +272,13 @@ class HighwayTrafficEnv(gym.Env):
                 if i == agent_vehicle_idx:
                     rewards += 1.0  # Reward for successfully traversing
         
-        # Remove exited vehicles
+        # Remove exited vehicles and calculate journey times
         for i in vehicles_to_remove:
+            vehicle_id = int(self.vehicles[i, 6])
+            if vehicle_id in self.vehicle_spawn_times:
+                journey_time = self.sim_time - self.vehicle_spawn_times[vehicle_id]
+                self.journey_times.append(journey_time)
+                del self.vehicle_spawn_times[vehicle_id]
             self.vehicles[i, 5] = 0
         
         # Check collisions
@@ -391,12 +404,36 @@ class HighwayTrafficEnv(gym.Env):
         for i in range(self.max_vehicles):
             if self.vehicles[i, 5] == 1:
                 x, y, vx, vy, direction_code, _, vehicle_id, lane_offset = self.vehicles[i]
+                
+                # Calculate current journey time
+                current_journey_time = self.sim_time - self.vehicle_spawn_times.get(int(vehicle_id), self.sim_time)
+                
                 active_vehicles.append({
                     'id': int(vehicle_id),
                     'position': (x, y),
                     'velocity': (vx, vy),
                     'direction_code': int(direction_code),
                     'speed': np.sqrt(vx**2 + vy**2),
-                    'lane_offset': lane_offset
+                    'lane_offset': lane_offset,
+                    'journey_time': current_journey_time
                 })
-        return active_vehicles 
+        return active_vehicles
+    
+    def get_journey_statistics(self):
+        """Get journey time statistics."""
+        if not self.journey_times:
+            return {
+                'count': 0,
+                'average_time': 0,
+                'min_time': 0,
+                'max_time': 0,
+                'total_completed': 0
+            }
+        
+        return {
+            'count': len(self.journey_times),
+            'average_time': np.mean(self.journey_times),
+            'min_time': np.min(self.journey_times),
+            'max_time': np.max(self.journey_times),
+            'total_completed': len(self.journey_times)
+        } 

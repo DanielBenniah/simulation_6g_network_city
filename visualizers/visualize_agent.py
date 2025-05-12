@@ -11,7 +11,10 @@ from matplotlib.animation import FuncAnimation
 import time
 import argparse
 from stable_baselines3 import PPO
-from city_traffic_env import CityTrafficEnv
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from environments.city_traffic_env import CityTrafficEnv
 
 class TrafficVisualizer:
     """Visualizes the traffic environment and agent behavior."""
@@ -91,16 +94,29 @@ class TrafficVisualizer:
             self.ax.add_patch(dest_patch)
             self.vehicle_patches.append(dest_patch)
     
-    def _update_info_text(self, step, total_reward, vehicles, collisions, episode):
-        """Update the information text display."""
+    def _update_info_text(self, step, total_reward, vehicles, collisions, episode, step_info=None):
+        """Update the information text display with 6G communication info."""
         active_vehicles = int(np.sum(vehicles[:, 6]))  # Count active vehicles (where vehicles[i, 6] == 1)
         total_vehicles = len(vehicles)
         
-        info = f"Episode: {episode}\n"
-        info += f"Step: {step}\n"
+        # Get 6G communication stats from step_info if available
+        messages_sent = step_info.get('messages_sent', 0) if step_info else 0
+        messages_delivered = step_info.get('messages_delivered', 0) if step_info else 0
+        intersection_denials = len(step_info.get('intersection_denials', [])) if step_info else 0
+        
+        info = f"🌆 SMART CITY with 6G Communication\n"
+        info += f"Episode: {episode} | Step: {step}\n"
         info += f"Total Reward: {total_reward:.2f}\n"
         info += f"Active Vehicles: {active_vehicles}/{total_vehicles}\n"
-        info += f"Collisions: {collisions}"
+        info += f"Collisions: {collisions} (6G Prevention!)\n"
+        info += f"📡 6G Messages Sent: {messages_sent}\n"
+        info += f"📨 Messages Delivered: {messages_delivered}\n"
+        info += f"🚦 Intersection Denials: {intersection_denials}\n"
+        
+        # Show delivery rate if available
+        if messages_sent > 0:
+            delivery_rate = (messages_delivered / messages_sent) * 100
+            info += f"📶 6G Delivery Rate: {delivery_rate:.1f}%"
         
         self.info_text.set_text(info)
     
@@ -133,7 +149,7 @@ class TrafficVisualizer:
             
             # Update visualization
             self._draw_vehicles(self.env.vehicles)
-            self._update_info_text(step, total_reward, self.env.vehicles, collisions, episode_num)
+            self._update_info_text(step, total_reward, self.env.vehicles, collisions, episode_num, info)
             
             plt.draw()
             plt.pause(delay)
@@ -151,7 +167,7 @@ class TrafficVisualizer:
 
 def main():
     parser = argparse.ArgumentParser(description='Visualize trained traffic agent')
-    parser.add_argument('--model-path', type=str, default='ppo_city_traffic.zip',
+    parser.add_argument('--model-path', type=str, default='trained_models/ppo_city_traffic.zip',
                        help='Path to trained model')
     parser.add_argument('--episodes', type=int, default=5,
                        help='Number of episodes to run')

@@ -10,7 +10,10 @@ import matplotlib.patches as patches
 import time
 import argparse
 from stable_baselines3 import PPO
-from demo_traffic_env import DemoTrafficEnv
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from environments.demo_traffic_env import DemoTrafficEnv
 
 class DemoTrafficVisualizer:
     """Demo visualizer optimized for showing speed variations and traffic behavior."""

@@ -16,7 +16,10 @@ import matplotlib.pyplot as plt
 # Set matplotlib backend for compatibility
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend by default
-from city_traffic_env import CityTrafficEnv
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from environments.city_traffic_env import CityTrafficEnv
 
 # --- Training script for CityTrafficEnv using Stable Baselines3 PPO ---
 # This script uses single-agent mode (multi_agent=False) for simplicity.

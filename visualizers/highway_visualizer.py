@@ -10,7 +10,10 @@ import matplotlib.patches as patches
 import time
 import argparse
 from stable_baselines3 import PPO
-from highway_traffic_env import HighwayTrafficEnv
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from environments.highway_traffic_env import HighwayTrafficEnv
 
 class HighwayTrafficVisualizer:
     """Visualizer for highway-style traffic simulation."""
@@ -147,11 +150,12 @@ class HighwayTrafficVisualizer:
             self.ax.add_patch(vehicle_rect)
             self.vehicle_patches.append(vehicle_rect)
             
-            # Speed and direction indicator
+            # Speed and direction indicator with journey time
             speed_category = "🐌" if speed < 0.6 else "🚗" if speed < 1.2 else "🏎️"
-            vehicle_text = f'{symbol}\n{speed_category}\n{speed:.1f}'
-            text = self.ax.text(x, y + 0.3, vehicle_text, ha='center', va='center', 
-                               fontsize=7, fontweight='bold', color='white',
+            journey_time = vehicle.get('journey_time', 0)
+            vehicle_text = f'{symbol}\n{speed_category}\n{speed:.1f}\n{journey_time:.0f}s'
+            text = self.ax.text(x, y + 0.35, vehicle_text, ha='center', va='center', 
+                               fontsize=6, fontweight='bold', color='white',
                                bbox=dict(boxstyle='round,pad=0.1', facecolor=color, alpha=0.8))
             self.vehicle_patches.append(text)
             
@@ -168,7 +172,7 @@ class HighwayTrafficVisualizer:
         return len(active_vehicles), total_speed, speed_counts
     
     def _update_displays(self, step, total_reward, active_count, total_speed, speed_counts, 
-                        collisions, info, episode):
+                        collisions, info, episode, journey_stats):
         """Update information displays."""
         avg_speed = total_speed / max(active_count, 1)
         
@@ -180,7 +184,12 @@ class HighwayTrafficVisualizer:
         main_info += f"Collisions: {collisions}\n"
         main_info += f"Vehicles Spawned: {info.get('vehicles_spawned', 0)}\n"
         main_info += f"Vehicles Exited: {info.get('vehicles_exited', 0)}\n"
-        main_info += f"Throughput: {info.get('throughput', 0)}"
+        main_info += f"Throughput: {info.get('throughput', 0)}\n"
+        main_info += f"Journey Stats:\n"
+        main_info += f"  Completed: {journey_stats['total_completed']}\n"
+        if journey_stats['total_completed'] > 0:
+            main_info += f"  Avg Time: {journey_stats['average_time']:.1f}s\n"
+            main_info += f"  Range: {journey_stats['min_time']:.1f}-{journey_stats['max_time']:.1f}s"
         
         self.info_text.set_text(main_info)
         
@@ -247,8 +256,9 @@ class HighwayTrafficVisualizer:
             # Update visualization
             active_vehicles = self.env.get_active_vehicles()
             active_count, total_speed, speed_counts = self._draw_vehicles(active_vehicles)
+            journey_stats = self.env.get_journey_statistics()
             self._update_displays(step, total_reward, active_count, total_speed, speed_counts,
-                                total_collisions, step_info, episode_num)
+                                total_collisions, step_info, episode_num, journey_stats)
             
             plt.draw()
             plt.pause(delay)
@@ -262,6 +272,9 @@ class HighwayTrafficVisualizer:
             if terminated or truncated:
                 break
         
+        # Get final journey statistics
+        final_journey_stats = self.env.get_journey_statistics()
+        
         print(f"\n📈 HIGHWAY EPISODE {episode_num} SUMMARY:")
         print(f"   Duration: {step} steps")
         print(f"   Agent Total Reward: {total_reward:.2f}")
@@ -270,6 +283,11 @@ class HighwayTrafficVisualizer:
         print(f"   Vehicles Completed Journey: {total_exited}")
         print(f"   Final Active Vehicles: {active_count}")
         print(f"   Throughput Rate: {total_exited/step:.3f} vehicles/step")
+        if final_journey_stats['total_completed'] > 0:
+            print(f"   Journey Time Stats:")
+            print(f"     Average: {final_journey_stats['average_time']:.1f} steps")
+            print(f"     Range: {final_journey_stats['min_time']:.1f} - {final_journey_stats['max_time']:.1f} steps")
+            print(f"     Efficiency: {final_journey_stats['total_completed']/total_spawned*100:.1f}% completion rate")
         
         return total_reward, step, total_collisions, total_exited
 
@@ -283,9 +301,9 @@ def main():
                        help='Animation delay (seconds)')
     parser.add_argument('--grid-size', type=int, default=10,
                        help='Grid size')
-    parser.add_argument('--max-vehicles', type=int, default=16,
+    parser.add_argument('--max-vehicles', type=int, default=24,
                        help='Maximum vehicles')
-    parser.add_argument('--spawn-rate', type=float, default=0.2,
+    parser.add_argument('--spawn-rate', type=float, default=0.4,
                        help='Vehicle spawn rate (0.0-1.0)')
     parser.add_argument('--use-trained-model', action='store_true',
                        help='Use trained model instead of random actions')

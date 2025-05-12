@@ -1,7 +1,10 @@
 import unittest
 import numpy as np
-from city_traffic_env import CityTrafficEnv
-from intersection_manager import IntersectionManager
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from environments.city_traffic_env import CityTrafficEnv
+from utils.intersection_manager import IntersectionManager
 
 class TestIntersectionManager(unittest.TestCase):
     def test_conflicting_reservations(self):

@@ -1,8 +1,11 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-from intersection_manager import IntersectionManager
-from comm_module import CommModule
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from utils.intersection_manager import IntersectionManager
+from utils.comm_module import CommModule
 import matplotlib.pyplot as plt
 
 class CityTrafficEnv(gym.Env):
@@ -17,6 +20,7 @@ class CityTrafficEnv(gym.Env):
         max_vehicles (int): Maximum number of vehicles in the environment.
         multi_agent (bool): If True, all vehicles are learning agents; if False, only agent 0 is learning.
         debug (bool): If True, prints detailed debug information each step.
+        continuous_spawn (bool): Enable continuous vehicle spawning for long episodes.
 
     Observation:
         [x, y, vx, vy, route_x, route_y, dist_to_inter, stopped, ...nearest_vehicles]
@@ -32,7 +36,7 @@ class CityTrafficEnv(gym.Env):
     """
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, grid_size=(10, 10), max_vehicles=10, multi_agent=True, debug=False):
+    def __init__(self, grid_size=(10, 10), max_vehicles=10, multi_agent=True, debug=False, continuous_spawn=False):
         """
         Initialize the CityTrafficEnv.
 
@@ -41,6 +45,7 @@ class CityTrafficEnv(gym.Env):
             max_vehicles (int): Maximum number of vehicles.
             multi_agent (bool): Multi-agent mode flag.
             debug (bool): Enable debug printouts if True.
+            continuous_spawn (bool): Enable continuous vehicle spawning for long episodes.
         """
         super(CityTrafficEnv, self).__init__()
         self.grid_size = grid_size
@@ -49,6 +54,8 @@ class CityTrafficEnv(gym.Env):
         self.dt = 1.0
         self.multi_agent = multi_agent
         self.debug = debug
+        self.continuous_spawn = continuous_spawn
+        self.spawn_rate = 0.3 if continuous_spawn else 0.0  # Spawn rate for continuous mode
         self.action_space = spaces.Discrete(self.n_actions)
         self.obs_dim = 7 + 1 + 4*3
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.obs_dim,), dtype=np.float32)
@@ -61,6 +68,12 @@ class CityTrafficEnv(gym.Env):
         self.pending_requests = {}
         self.intersection_responses = {}
         self.agent_ids = None
+        
+        # Journey tracking for continuous mode
+        self.vehicle_spawn_times = {}
+        self.journey_times = []
+        self.total_vehicles_spawned = 0
+        self.total_vehicles_completed = 0
 
     def reset(self, num_vehicles=None, seed=None, **kwargs):
         """
@@ -83,25 +96,17 @@ class CityTrafficEnv(gym.Env):
         self.agent_ids = [f"agent_{i}" for i in range(self.num_vehicles)]
         self.vehicles = np.zeros((self.max_vehicles, 7), dtype=np.float32)
         for i in range(self.num_vehicles):
-            self.vehicles[i, 0] = np.random.randint(0, self.grid_size[0])
-            self.vehicles[i, 1] = np.random.randint(0, self.grid_size[1])
-            direction = np.random.randint(0, 4)
-            speed = np.random.randint(0, 2)
-            if direction == 0:
-                self.vehicles[i, 2] = -speed
-                self.vehicles[i, 3] = 0
-            elif direction == 1:
-                self.vehicles[i, 2] = 0
-                self.vehicles[i, 3] = speed
-            elif direction == 2:
-                self.vehicles[i, 2] = speed
-                self.vehicles[i, 3] = 0
-            elif direction == 3:
-                self.vehicles[i, 2] = 0
-                self.vehicles[i, 3] = -speed
-            self.vehicles[i, 4] = np.random.randint(0, self.grid_size[0])
-            self.vehicles[i, 5] = np.random.randint(0, self.grid_size[1])
-            self.vehicles[i, 6] = 1
+            self._spawn_vehicle_at_index(i)
+            
+        # Initialize journey tracking
+        self.vehicle_spawn_times = {}
+        self.journey_times = []
+        self.total_vehicles_spawned = self.num_vehicles
+        self.total_vehicles_completed = 0
+        
+        # Track spawn times for initial vehicles
+        for i in range(self.num_vehicles):
+            self.vehicle_spawn_times[i] = self.sim_time
         self.intersection = IntersectionManager()
         self.comm = CommModule()
         self.sim_time = 0.0
@@ -264,6 +269,13 @@ class CityTrafficEnv(gym.Env):
                     info["intersection_denials"].append(i)
                     continue
             if (new_x < 0 or new_x >= self.grid_size[0] or new_y < 0 or new_y >= self.grid_size[1]):
+                # Track completion if vehicle exits in continuous mode
+                if self.continuous_spawn and i in self.vehicle_spawn_times:
+                    journey_time = self.sim_time - self.vehicle_spawn_times[i]
+                    self.journey_times.append(journey_time)
+                    self.total_vehicles_completed += 1
+                    del self.vehicle_spawn_times[i]
+                
                 self.vehicles[i, 6] = 0
                 rewards[i] = -1  # Penalty for leaving grid
                 continue
@@ -286,12 +298,27 @@ class CityTrafficEnv(gym.Env):
                 rewards[i] -= 0.1  # Penalty for being stopped
             if self.vehicles[i, 0] == route_x and self.vehicles[i, 1] == route_y:
                 rewards[i] += 1  # Reward for reaching destination
+                
+                # Track completion in continuous mode
+                if self.continuous_spawn and i in self.vehicle_spawn_times:
+                    journey_time = self.sim_time - self.vehicle_spawn_times[i]
+                    self.journey_times.append(journey_time)
+                    self.total_vehicles_completed += 1
+                    del self.vehicle_spawn_times[i]
+                
                 self.vehicles[i, 4] = np.random.randint(0, self.grid_size[0])
                 self.vehicles[i, 5] = np.random.randint(0, self.grid_size[1])
         self.intersection.cleanup(self.sim_time + self.dt)
         self.sim_time += self.dt
+        # Spawn new vehicles in continuous mode
+        if self.continuous_spawn and np.random.random() < self.spawn_rate:
+            self._try_spawn_new_vehicle()
+        
         # Check if episode is done (all vehicles inactive)
-        terminated = np.sum(self.vehicles[:, 6]) == 0
+        if self.continuous_spawn:
+            terminated = False  # Never terminate in continuous mode
+        else:
+            terminated = np.sum(self.vehicles[:, 6]) == 0
         obs = self._get_all_obs()
         if self.multi_agent:
             rew = {aid: rewards[i] for i, aid in enumerate(self.agent_ids)}
@@ -429,4 +456,60 @@ class CityTrafficEnv(gym.Env):
         ax.set_ylabel('X (North-South)')
         ax.set_title('City Traffic Simulation')
         plt.tight_layout()
-        plt.show() 
+        plt.show()
+    
+    def _spawn_vehicle_at_index(self, i):
+        """Spawn a vehicle at the given index."""
+        self.vehicles[i, 0] = np.random.randint(0, self.grid_size[0])
+        self.vehicles[i, 1] = np.random.randint(0, self.grid_size[1])
+        direction = np.random.randint(0, 4)
+        speed = np.random.randint(0, 2)
+        if direction == 0:
+            self.vehicles[i, 2] = -speed
+            self.vehicles[i, 3] = 0
+        elif direction == 1:
+            self.vehicles[i, 2] = 0
+            self.vehicles[i, 3] = speed
+        elif direction == 2:
+            self.vehicles[i, 2] = speed
+            self.vehicles[i, 3] = 0
+        elif direction == 3:
+            self.vehicles[i, 2] = 0
+            self.vehicles[i, 3] = -speed
+        self.vehicles[i, 4] = np.random.randint(0, self.grid_size[0])
+        self.vehicles[i, 5] = np.random.randint(0, self.grid_size[1])
+        self.vehicles[i, 6] = 1
+    
+    def _try_spawn_new_vehicle(self):
+        """Try to spawn a new vehicle in an empty slot."""
+        # Find empty slot
+        for i in range(self.max_vehicles):
+            if self.vehicles[i, 6] == 0:  # Not active
+                self._spawn_vehicle_at_index(i)
+                self.vehicle_spawn_times[i] = self.sim_time
+                self.total_vehicles_spawned += 1
+                if self.debug:
+                    print(f"[6G_CITY] Spawned new vehicle {i} at ({self.vehicles[i, 0]}, {self.vehicles[i, 1]})")
+                return True
+        return False
+    
+    def get_journey_statistics(self):
+        """Get journey time statistics for continuous mode."""
+        if not self.continuous_spawn or not self.journey_times:
+            return {
+                'count': 0,
+                'average_time': 0,
+                'min_time': 0,
+                'max_time': 0,
+                'total_completed': self.total_vehicles_completed,
+                'total_spawned': self.total_vehicles_spawned
+            }
+        
+        return {
+            'count': len(self.journey_times),
+            'average_time': np.mean(self.journey_times),
+            'min_time': np.min(self.journey_times),
+            'max_time': np.max(self.journey_times),
+            'total_completed': self.total_vehicles_completed,
+            'total_spawned': self.total_vehicles_spawned
+        } 

@@ -12,7 +12,10 @@ from matplotlib.animation import FuncAnimation
 import time
 import argparse
 from stable_baselines3 import PPO
-from city_traffic_env import CityTrafficEnv
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from environments.city_traffic_env import CityTrafficEnv
 
 class EnhancedTrafficVisualizer:
     """Enhanced visualizer for traffic environment with better visual feedback."""

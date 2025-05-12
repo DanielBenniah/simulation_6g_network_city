@@ -7,8 +7,11 @@ more interesting traffic behavior including speed variations.
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-from intersection_manager import IntersectionManager
-from comm_module import CommModule
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from utils.intersection_manager import IntersectionManager
+from utils.comm_module import CommModule
 
 class DemoTrafficEnv(gym.Env):
     """
