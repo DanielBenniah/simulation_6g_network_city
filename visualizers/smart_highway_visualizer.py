@@ -60,12 +60,10 @@ class SmartHighwayVisualizer:
         # Draw highway infrastructure
         self._draw_highway_infrastructure()
         
-        # Direction colors for vehicles
+        # Direction colors for vehicles (only 2 directions now)
         self.direction_colors = {
-            0: '#FF6B6B',  # L2R - Red
-            1: '#4ECDC4',  # R2L - Teal
-            2: '#45B7D1',  # T2B - Blue  
-            3: '#96CEB4'   # B2T - Green
+            0: '#FF6B6B',  # L2R - Red (Horizontal Traffic)
+            1: '#45B7D1',  # T2B - Blue (Vertical Traffic)
         }
     
     def _draw_highway_infrastructure(self):
@@ -91,62 +89,113 @@ class SmartHighwayVisualizer:
                     self.ax.plot([x, x], [i-0.7, i-0.3], 'w-', linewidth=1, alpha=0.5)
                     self.ax.plot([x, x], [i-0.3, i+0.3], 'w-', linewidth=1, alpha=0.5)
         
-        # Draw intersections with 6G infrastructure
+        # Draw major intersections with enhanced 6G infrastructure
         intersection_info = self.env.get_intersection_info()
         for intersection in intersection_info['intersections']:
             x, y = intersection['position']
             intersection_type = intersection['type']
+            size = intersection.get('size', 0.6)
             
             if intersection_type == 'main':
-                # Main intersection with 6G tower
-                circle = patches.Circle((y, x), 0.4, color='orange', alpha=0.7, 
-                                      linewidth=3, edgecolor='red')
+                # Main intersection with enhanced visualization
+                # Safety zone
+                safety_circle = patches.Circle((y, x), 1.5, color='orange', alpha=0.2, 
+                                             linewidth=1, edgecolor='orange', linestyle='--')
+                self.ax.add_patch(safety_circle)
+                
+                # Main intersection core
+                circle = patches.Circle((y, x), size, color='red', alpha=0.8, 
+                                      linewidth=4, edgecolor='darkred')
                 self.ax.add_patch(circle)
-                self.ax.text(y, x, '📡\n6G\nMAIN', ha='center', va='center', 
+                self.ax.text(y, x, '📡\n6G\nMAIN\n🚦', ha='center', va='center', 
                            fontsize=8, fontweight='bold', color='white')
             else:
-                # Minor intersection
-                circle = patches.Circle((y, x), 0.25, color='yellow', alpha=0.5, 
-                                      linewidth=2, edgecolor='orange')
+                # Major intersection
+                # Safety zone
+                safety_circle = patches.Circle((y, x), 1.2, color='yellow', alpha=0.15, 
+                                             linewidth=1, edgecolor='yellow', linestyle='--')
+                self.ax.add_patch(safety_circle)
+                
+                # Major intersection core
+                circle = patches.Circle((y, x), size, color='orange', alpha=0.7, 
+                                      linewidth=3, edgecolor='darkorange')
                 self.ax.add_patch(circle)
-                self.ax.text(y, x, '📡', ha='center', va='center', 
-                           fontsize=6, color='black')
+                self.ax.text(y, x, '📡\n6G\n🚦', ha='center', va='center', 
+                           fontsize=7, fontweight='bold', color='white')
+            
+            # Draw lane approach indicators
+            self._draw_intersection_lanes(x, y, size)
         
         # Draw lane direction indicators
         self._draw_lane_indicators()
         
         # Add legend
         legend_elements = [
-            patches.Circle((0, 0), 0.1, color='orange', alpha=0.7, label='🏛️ Main 6G Intersection'),
-            patches.Circle((0, 0), 0.1, color='yellow', alpha=0.5, label='📡 Minor 6G Intersection'),
-            patches.Rectangle((0, 0), 0.1, 0.1, color='#FF6B6B', alpha=0.8, label='🚗 L2R Vehicles'),
-            patches.Rectangle((0, 0), 0.1, 0.1, color='#4ECDC4', alpha=0.8, label='🚙 R2L Vehicles'),
-            patches.Rectangle((0, 0), 0.1, 0.1, color='#45B7D1', alpha=0.8, label='🚐 T2B Vehicles'),
-            patches.Rectangle((0, 0), 0.1, 0.1, color='#96CEB4', alpha=0.8, label='🚛 B2T Vehicles'),
+            patches.Circle((0, 0), 0.1, color='red', alpha=0.8, label='🏛️ Main 6G Intersection'),
+            patches.Circle((0, 0), 0.1, color='orange', alpha=0.7, label='📡 Major 6G Intersection'),
+            patches.Rectangle((0, 0), 0.1, 0.1, color='#FF6B6B', alpha=0.8, label='🚗 Horizontal Traffic (L2R)'),
+            patches.Rectangle((0, 0), 0.1, 0.1, color='#45B7D1', alpha=0.8, label='🚐 Vertical Traffic (T2B)'),
+            patches.Circle((0, 0), 0.05, color='orange', alpha=0.2, label='🛡️ Safety Zones'),
         ]
         self.ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(0.02, 0.85))
     
     def _draw_lane_indicators(self):
-        """Draw lane direction indicators."""
+        """Draw lane direction indicators exactly where vehicles travel."""
         grid_width, grid_height = self.env.grid_size
         
-        # Horizontal lane indicators
-        for y in range(1, grid_height - 1):
-            # L2R indicator
-            self.ax.annotate('', xy=(grid_width*0.8, y-0.15), xytext=(grid_width*0.2, y-0.15),
-                           arrowprops=dict(arrowstyle='->', color='#FF6B6B', lw=2, alpha=0.6))
-            # R2L indicator  
-            self.ax.annotate('', xy=(grid_width*0.2, y+0.15), xytext=(grid_width*0.8, y+0.15),
-                           arrowprops=dict(arrowstyle='->', color='#4ECDC4', lw=2, alpha=0.6))
+        # Define exact lane positions that match vehicle spawning
+        lane_positions = [2, 4, 6, 8]  # Vehicles only travel on these lanes
         
-        # Vertical lane indicators
-        for x in range(1, grid_width - 1):
-            # T2B indicator
-            self.ax.annotate('', xy=(x-0.15, grid_height*0.8), xytext=(x-0.15, grid_height*0.2),
-                           arrowprops=dict(arrowstyle='->', color='#45B7D1', lw=2, alpha=0.6))
-            # B2T indicator
-            self.ax.annotate('', xy=(x+0.15, grid_height*0.2), xytext=(x+0.15, grid_height*0.8),
-                           arrowprops=dict(arrowstyle='->', color='#96CEB4', lw=2, alpha=0.6))
+        # Horizontal lane indicators (L2R only) - exactly where vehicles travel
+        for y in lane_positions:
+            # Multiple L2R lane indicators at exact vehicle positions
+            for lane_offset in [-0.4, -0.2, 0.0, 0.2, 0.4]:
+                self.ax.annotate('', xy=(grid_width*0.9, y+lane_offset), xytext=(grid_width*0.1, y+lane_offset),
+                               arrowprops=dict(arrowstyle='->', color='#FF6B6B', lw=1.5, alpha=0.5))
+                
+                # Draw lane boundaries
+                if lane_offset in [-0.4, 0.4]:  # Outer lanes
+                    self.ax.axhline(y=y+lane_offset+0.1, color='white', linewidth=1, alpha=0.3, linestyle='-')
+                    self.ax.axhline(y=y+lane_offset-0.1, color='white', linewidth=1, alpha=0.3, linestyle='-')
+        
+        # Vertical lane indicators (T2B only) - exactly where vehicles travel
+        for x in lane_positions:
+            # Multiple T2B lane indicators at exact vehicle positions
+            for lane_offset in [-0.4, -0.2, 0.0, 0.2, 0.4]:
+                self.ax.annotate('', xy=(x+lane_offset, grid_height*0.9), xytext=(x+lane_offset, grid_height*0.1),
+                               arrowprops=dict(arrowstyle='->', color='#45B7D1', lw=1.5, alpha=0.5))
+                
+                # Draw lane boundaries
+                if lane_offset in [-0.4, 0.4]:  # Outer lanes
+                    self.ax.axvline(x=x+lane_offset+0.1, color='white', linewidth=1, alpha=0.3, linestyle='-')
+                    self.ax.axvline(x=x+lane_offset-0.1, color='white', linewidth=1, alpha=0.3, linestyle='-')
+    
+    def _draw_intersection_lanes(self, x, y, size):
+        """Draw approach lanes for intersections."""
+        # Draw approach lane markers
+        lane_offsets = [-0.4, -0.2, 0.0, 0.2, 0.4]
+        
+        # Horizontal approach lanes
+        for offset in lane_offsets:
+            # Entry markers
+            entry_marker = patches.Rectangle((y-size-0.3, x+offset-0.05), 0.2, 0.1, 
+                                           color='white', alpha=0.8)
+            self.ax.add_patch(entry_marker)
+            # Exit markers  
+            exit_marker = patches.Rectangle((y+size+0.1, x+offset-0.05), 0.2, 0.1, 
+                                          color='white', alpha=0.8)
+            self.ax.add_patch(exit_marker)
+        
+        # Vertical approach lanes
+        for offset in lane_offsets:
+            # Entry markers
+            entry_marker = patches.Rectangle((y+offset-0.05, x-size-0.3), 0.1, 0.2, 
+                                           color='white', alpha=0.8)
+            self.ax.add_patch(entry_marker)
+            # Exit markers
+            exit_marker = patches.Rectangle((y+offset-0.05, x+size+0.1), 0.1, 0.2, 
+                                          color='white', alpha=0.8)
+            self.ax.add_patch(exit_marker)
     
     def _draw_vehicles(self, vehicles):
         """Draw vehicles with proper lane positioning and direction indicators."""
@@ -157,7 +206,7 @@ class SmartHighwayVisualizer:
         
         active_count = 0
         total_speed = 0
-        direction_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+        direction_counts = {0: 0, 1: 0}  # Only 2 directions now
         
         for i in range(len(vehicles)):
             if vehicles[i, 6] == 0:  # Skip inactive vehicles
@@ -175,9 +224,9 @@ class SmartHighwayVisualizer:
             color = self.direction_colors[direction]
             
             # Apply lane offset for proper lane positioning
-            if direction in [0, 1]:  # Horizontal movement
+            if direction == 0:  # Horizontal movement (L2R)
                 visual_x, visual_y = x, y + lane_offset
-            else:  # Vertical movement
+            else:  # Vertical movement (T2B)
                 visual_x, visual_y = x + lane_offset, y
             
             # Vehicle size based on speed
@@ -186,7 +235,7 @@ class SmartHighwayVisualizer:
             vehicle_size = base_size * size_factor
             
             # Draw vehicle as rectangle with direction
-            if direction in [0, 1]:  # Horizontal vehicles (wider)
+            if direction == 0:  # Horizontal vehicles (wider)
                 width, height = vehicle_size * 1.5, vehicle_size
             else:  # Vertical vehicles (taller)
                 width, height = vehicle_size, vehicle_size * 1.5
@@ -199,7 +248,7 @@ class SmartHighwayVisualizer:
             
             # Vehicle ID and speed
             vehicle_text = f'V{i}\n{speed:.1f}'
-            text_color = 'white' if direction in [2, 3] else 'black'
+            text_color = 'white' if direction == 1 else 'black'  # White for vertical, black for horizontal
             text = self.ax.text(visual_y, visual_x, vehicle_text, ha='center', va='center', 
                                fontsize=7, fontweight='bold', color=text_color)
             self.vehicle_patches.append(text)
@@ -234,8 +283,8 @@ class SmartHighwayVisualizer:
         main_info += f"Agent Reward: {total_reward:.2f}\n"
         main_info += f"Active Vehicles: {active_count}\n"
         main_info += f"Average Speed: {avg_speed:.2f}\n"
-        main_info += f"L2R: {direction_counts[0]} | R2L: {direction_counts[1]}\n"
-        main_info += f"T2B: {direction_counts[2]} | B2T: {direction_counts[3]}"
+        main_info += f"Horizontal (L2R): {direction_counts[0]}\n"
+        main_info += f"Vertical (T2B): {direction_counts[1]}"
         
         self.info_text.set_text(main_info)
         
@@ -244,6 +293,7 @@ class SmartHighwayVisualizer:
         messages_delivered = step_info.get('messages_delivered', 0)
         reservations = len(step_info.get('intersection_reservations', []))
         collisions_prevented = len(step_info.get('collisions_prevented', []))
+        actual_collisions = len(step_info.get('actual_collisions', []))
         delivery_rate = (messages_delivered / max(messages_sent, 1)) * 100
         
         comm_info = f"📡 6G COMMUNICATION STATUS\n"
@@ -251,8 +301,9 @@ class SmartHighwayVisualizer:
         comm_info += f"Messages Delivered: {messages_delivered}\n"
         comm_info += f"Delivery Rate: {delivery_rate:.1f}%\n"
         comm_info += f"🚦 Intersection Reservations: {reservations}\n"
-        comm_info += f"🛡️  Collisions Prevented: {collisions_prevented}\n"
-        comm_info += f"✅ 6G Collision Prevention: ACTIVE"
+        comm_info += f"🛡️  6G Prevented: {collisions_prevented}\n"
+        comm_info += f"💥 Actual Collisions: {actual_collisions}\n"
+        comm_info += f"✅ 6G System: {'LEARNING' if actual_collisions == 0 else 'ACTIVE'}"
         
         self.comm_text.set_text(comm_info)
         
@@ -303,20 +354,27 @@ class SmartHighwayVisualizer:
             # Get action (random for demo, or from trained model)
             if self.model:
                 action, _ = self.model.predict(obs, deterministic=True)
+                if step == 1:  # Only print once per episode
+                    print("   🧠 Using TRAINED model for agent decisions")
             else:
                 action = np.random.randint(0, 3)  # 0=maintain, 1=accelerate, 2=brake
+                if step == 1:  # Only print once per episode
+                    print("   🎲 Using RANDOM actions for agent (training needed)")
             
             # Take step
             obs, reward, terminated, truncated, step_info = self.env.step(action)
             total_reward += reward
             step += 1
             
-            # Track 6G collision prevention
+            # Track 6G collision prevention and actual collisions
             collisions_prevented = len(step_info.get('collisions_prevented', []))
+            actual_collisions = len(step_info.get('actual_collisions', []))
             total_6g_prevented += collisions_prevented
             
-            if collisions_prevented > 0:
-                print(f"   🛡️  Step {step}: 6G prevented {collisions_prevented} collision(s)!")
+            if actual_collisions > 0:
+                print(f"   💥 Step {step}: {actual_collisions} ACTUAL collision(s) occurred!")
+            elif collisions_prevented > 0:
+                print(f"   🛡️  Step {step}: 6G prevented {collisions_prevented} potential collision(s)")
             
             # Track 6G communication activity
             if step_info.get('messages_sent', 0) > 0 and step % 25 == 0:

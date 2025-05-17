@@ -27,41 +27,49 @@ from utils.comm_module import CommModule
 class SmartHighwayEnv:
     """Smart highway with 6G communication and proper lane management."""
     
-    def __init__(self, grid_size=(10, 10), max_vehicles=16, spawn_rate=0.4, debug=False):
+    def __init__(self, grid_size=(10, 10), max_vehicles=24, spawn_rate=0.6, 
+                 multi_agent=False, debug=False):
         """
-        Initialize Smart Highway Environment.
+        Initialize Smart Highway Environment with optional multi-agent support.
         
         Args:
             grid_size: Size of the highway grid (rows, cols)
-            max_vehicles: Maximum number of vehicles
-            spawn_rate: Rate of spawning new vehicles
+            max_vehicles: Maximum number of vehicles in simulation
+            spawn_rate: Probability of spawning new vehicles each step
+            multi_agent: If True, all vehicles are learning agents; if False, only vehicle 0 learns
             debug: Enable debug output
         """
         self.grid_size = grid_size
         self.max_vehicles = max_vehicles
         self.spawn_rate = spawn_rate
+        self.multi_agent = multi_agent  # NEW: Multi-agent support
         self.debug = debug
         
-        # Action space: 0=maintain, 1=accelerate, 2=brake
-        self.action_space = spaces.Discrete(3)
+        # Agent IDs for multi-agent mode
+        self.agent_ids = [f"agent_{i}" for i in range(max_vehicles)] if multi_agent else None
+        
+        # Action and observation spaces
+        self.single_action_space = spaces.Discrete(3)  # 0=maintain, 1=accelerate, 2=brake
+        self.single_obs_space = spaces.Box(low=-np.inf, high=np.inf, shape=(20,), dtype=np.float32)
+        
+        if multi_agent:
+            self.action_space = spaces.Dict({
+                f"agent_{i}": self.single_action_space for i in range(max_vehicles)
+            })
+            self.observation_space = spaces.Dict({
+                f"agent_{i}": self.single_obs_space for i in range(max_vehicles)
+            })
+        else:
+            self.action_space = self.single_action_space
+            self.observation_space = self.single_obs_space
         
         # Vehicle state: [x, y, vx, vy, direction, lane_offset, active, spawn_time, dest_x, dest_y]
+        # direction: 0=L2R (West->East), 1=T2B (North->South)
         self.vehicles = np.zeros((max_vehicles, 10), dtype=np.float32)
         
-        # Direction codes: 0=L2R, 1=R2L, 2=T2B, 3=B2T
-        self.direction_codes = {
-            0: "L2R",  # Left to Right
-            1: "R2L",  # Right to Left  
-            2: "T2B",  # Top to Bottom
-            3: "B2T"   # Bottom to Top
-        }
-        
-        # Lane offsets for separation
-        self.lane_offset = 0.3
-        
-        # Speed parameters
-        self.min_speed = 0.5
+        # Highway parameters
         self.max_speed = 2.0
+        self.min_speed = 0.5
         self.acceleration = 0.3
         self.brake_factor = 0.5
         
@@ -81,28 +89,62 @@ class SmartHighwayEnv:
         self.collision_count = 0
         
     def _define_intersections(self):
-        """Define all intersections in the grid for traffic light integration."""
+        """Define major intersections clearly for traffic light integration."""
         intersections = []
         rows, cols = self.grid_size
         
-        # Create intersections at every grid point where vehicles can cross
-        for row in range(1, rows - 1):  # Skip borders
-            for col in range(1, cols - 1):  # Skip borders
+        # Create major intersections at lane crossing points
+        lane_positions = [2, 4, 6, 8]  # Match vehicle lane positions
+        for row in lane_positions:
+            for col in lane_positions:
+                intersection_type = 'main' if (row, col) == (rows//2, cols//2) else 'major'
+                
                 intersection = {
                     'id': f"intersection_{row}_{col}",
                     'position': (row, col),
-                    'type': 'main' if (row, col) == (rows//2, cols//2) else 'minor',
+                    'type': intersection_type,
+                    'size': 0.8 if intersection_type == 'main' else 0.6,  # Visual size
                     'lanes': {
-                        'horizontal': [(row, col-0.3), (row, col+0.3)],  # L2R, R2L lanes
-                        'vertical': [(row-0.3, col), (row+0.3, col)]     # T2B, B2T lanes
+                        'horizontal': {
+                            'approach_lanes': [
+                                (row - 0.4, col), (row - 0.2, col), (row, col), (row + 0.2, col), (row + 0.4, col)
+                            ],
+                            'direction': 'L2R',
+                            'speed_limit': self.max_speed
+                        },
+                        'vertical': {
+                            'approach_lanes': [
+                                (row, col - 0.4), (row, col - 0.2), (row, col), (row, col + 0.2), (row, col + 0.4)
+                            ],
+                            'direction': 'T2B', 
+                            'speed_limit': self.max_speed
+                        }
                     },
-                    'has_traffic_light': False,  # For future integration
-                    'light_state': 'green'       # For future integration
+                    'traffic_light': {
+                        'has_light': True,  # All major intersections have lights
+                        'current_state': 'green_horizontal',  # green_horizontal, green_vertical, yellow, red
+                        'cycle_time': 30.0,  # seconds per cycle
+                        'last_change': 0.0,
+                        'phases': ['green_horizontal', 'yellow_horizontal', 'green_vertical', 'yellow_vertical']
+                    },
+                    '6g_infrastructure': {
+                        'tower_position': (row, col),
+                        'communication_range': 3.0,
+                        'message_capacity': 100,
+                        'reliability': 0.99
+                    },
+                    'safety_zone': {
+                        'radius': 1.5,
+                        'emergency_brake_distance': 2.0,
+                        'collision_detection_active': True
+                    }
                 }
                 intersections.append(intersection)
         
         if self.debug:
-            print(f"[SMART_HIGHWAY] Defined {len(intersections)} intersections")
+            print(f"[SMART_HIGHWAY] Defined {len(intersections)} major intersections")
+            for intersection in intersections:
+                print(f"  - {intersection['id']} at {intersection['position']} ({intersection['type']})")
             
         return intersections
     
@@ -120,42 +162,70 @@ class SmartHighwayEnv:
         self.comm = CommModule()
         self.intersection_manager = IntersectionManager()
         
-        # Spawn initial vehicles
-        for _ in range(min(4, self.max_vehicles)):
+        # Spawn initial vehicles (more for higher density)
+        for _ in range(min(8, self.max_vehicles)):
             self._spawn_vehicle()
             
-        return self._get_observation(), {}
+        if self.multi_agent:
+            # Multi-agent mode: return dict of observations for active vehicles
+            observations = {}
+            for i in range(self.max_vehicles):
+                if self.vehicles[i, 6] == 1:  # Active vehicle
+                    agent_id = f"agent_{i}"
+                    observations[agent_id] = self._get_observation(i)
+            return observations, {}
+        else:
+            # Single-agent mode: return observation for vehicle 0
+            return self._get_observation(0), {}
     
     def _spawn_vehicle(self):
-        """Spawn a new vehicle in a proper lane."""
+        """Spawn vehicles in a way that creates intersection conflicts for better 6G testing."""
         # Find empty slot
         for i in range(self.max_vehicles):
             if self.vehicles[i, 6] == 0:  # Not active
-                direction = np.random.randint(0, 4)
+                # Bias spawning towards intersection areas to create conflicts
+                intersection_bias = np.random.random() < 0.7  # 70% chance to spawn near intersections
                 
-                if direction == 0:  # L2R (X-axis movement only)
-                    x, y = 0, np.random.randint(1, self.grid_size[0] - 1)
-                    vx, vy = np.random.uniform(self.min_speed, self.max_speed), 0.0  # PURE X movement
-                    dest_x, dest_y = self.grid_size[1] - 1, y
-                    lane_offset = -self.lane_offset
+                if intersection_bias:
+                    # Spawn vehicles that will cross intersections
+                    direction = np.random.randint(0, 2)
                     
-                elif direction == 1:  # R2L (X-axis movement only)
-                    x, y = self.grid_size[1] - 1, np.random.randint(1, self.grid_size[0] - 1)
-                    vx, vy = -np.random.uniform(self.min_speed, self.max_speed), 0.0  # PURE X movement
-                    dest_x, dest_y = 0, y
-                    lane_offset = self.lane_offset
+                    if direction == 0:  # L2R (Horizontal)
+                        # Spawn at intersection Y positions to create conflicts
+                        lane_y_positions = [2, 4, 6, 8]  # Intersection positions
+                        y = np.random.choice(lane_y_positions)
+                        x = np.random.uniform(0, 2)  # Spawn closer to intersection
+                        vx, vy = np.random.uniform(1.0, self.max_speed), 0.0
+                        dest_x, dest_y = self.grid_size[1] - 1, y
+                        
+                    else:  # T2B (Vertical)
+                        # Spawn at intersection X positions to create conflicts
+                        lane_x_positions = [2, 4, 6, 8]  # Intersection positions
+                        x = np.random.choice(lane_x_positions)
+                        y = np.random.uniform(0, 2)  # Spawn closer to intersection
+                        vx, vy = 0.0, np.random.uniform(1.0, self.max_speed)
+                        dest_x, dest_y = x, self.grid_size[0] - 1
+                else:
+                    # Regular spawning (for diversity)
+                    direction = np.random.randint(0, 2)
                     
-                elif direction == 2:  # T2B (Y-axis movement only)
-                    x, y = np.random.randint(1, self.grid_size[1] - 1), 0
-                    vx, vy = 0.0, np.random.uniform(self.min_speed, self.max_speed)  # PURE Y movement
-                    dest_x, dest_y = x, self.grid_size[0] - 1
-                    lane_offset = -self.lane_offset
-                    
-                else:  # B2T (Y-axis movement only)
-                    x, y = np.random.randint(1, self.grid_size[1] - 1), self.grid_size[0] - 1
-                    vx, vy = 0.0, -np.random.uniform(self.min_speed, self.max_speed)  # PURE Y movement
-                    dest_x, dest_y = x, 0
-                    lane_offset = self.lane_offset
+                    if direction == 0:  # L2R
+                        lane_y_positions = [2, 4, 6, 8]
+                        y = np.random.choice(lane_y_positions)
+                        x = 0
+                        vx, vy = np.random.uniform(self.min_speed, self.max_speed), 0.0
+                        dest_x, dest_y = self.grid_size[1] - 1, y
+                        
+                    else:  # T2B
+                        lane_x_positions = [2, 4, 6, 8]
+                        x = np.random.choice(lane_x_positions)
+                        y = 0
+                        vx, vy = 0.0, np.random.uniform(self.min_speed, self.max_speed)
+                        dest_x, dest_y = x, self.grid_size[0] - 1
+                
+                # Lane positioning for visualization
+                lane_positions = [-0.4, -0.2, 0.0, 0.2, 0.4]
+                lane_offset = np.random.choice(lane_positions)
                 
                 # Set vehicle state
                 self.vehicles[i] = [x, y, vx, vy, direction, lane_offset, 1, 
@@ -165,24 +235,33 @@ class SmartHighwayEnv:
                 self.total_spawned += 1
                 
                 if self.debug:
-                    print(f"[SMART_HIGHWAY] Spawned vehicle {i} ({self.direction_codes[direction]}) at ({x:.1f}, {y:.1f}) -> ({dest_x}, {dest_y})")
+                    print(f"[SMART_HIGHWAY] Spawned vehicle {i} (dir={direction}) at ({x:.1f}, {y:.1f}) -> ({dest_x}, {dest_y})")
                 
                 return True
         return False
     
-    def step(self, action):
-        """Execute one simulation step."""
+    def step(self, actions):
+        """Execute one simulation step with multi-agent support."""
         self.sim_time += 1
         
-        # Handle agent action (vehicle 0)
-        if self.vehicles[0, 6] == 1:  # If agent vehicle is active
-            self._apply_action(0, action)
-        
-        # Apply random actions to other vehicles for now
-        for i in range(1, self.max_vehicles):
-            if self.vehicles[i, 6] == 1:
-                random_action = np.random.randint(0, 3)
-                self._apply_action(i, random_action)
+        # Handle actions for all vehicles
+        if self.multi_agent:
+            # Multi-agent mode: all active vehicles are learning agents
+            for i in range(self.max_vehicles):
+                if self.vehicles[i, 6] == 1:  # If vehicle is active
+                    agent_id = f"agent_{i}"
+                    agent_action = actions.get(agent_id, 0)  # Default to maintain if no action
+                    self._apply_action(i, agent_action)
+        else:
+            # Single-agent mode: only vehicle 0 is learning
+            if self.vehicles[0, 6] == 1:  # If agent vehicle is active
+                self._apply_action(0, actions)
+            
+            # Apply random actions to other vehicles
+            for i in range(1, self.max_vehicles):
+                if self.vehicles[i, 6] == 1:
+                    random_action = np.random.randint(0, 3)
+                    self._apply_action(i, random_action)
         
         # 6G Communication phase
         step_info = self._handle_6g_communication()
@@ -197,16 +276,74 @@ class SmartHighwayEnv:
         if np.random.random() < self.spawn_rate:
             self._spawn_vehicle()
         
-        # Calculate reward
-        reward = self._calculate_reward()
-        
-        # Check termination
-        terminated = False  # Never terminate in continuous mode
-        truncated = False
-        
-        observation = self._get_observation()
-        
-        return observation, reward, terminated, truncated, step_info
+        # Calculate rewards for all vehicles
+        if self.multi_agent:
+            rewards = {}
+            terminated = {}
+            truncated = {}
+            observations = {}
+            
+            # Calculate individual rewards and termination for each active agent
+            for i in range(self.max_vehicles):
+                agent_id = f"agent_{i}"
+                if self.vehicles[i, 6] == 1:  # Active vehicle
+                    # Calculate reward for this agent
+                    agent_reward = self._calculate_reward(i)
+                    
+                    # Add collision penalty based on step_info
+                    collision_penalty = 0
+                    for collision in step_info.get('actual_collisions', []):
+                        if i in collision['vehicles']:
+                            collision_penalty += 5.0
+                    agent_reward -= collision_penalty
+                    
+                    rewards[agent_id] = agent_reward
+                    
+                    # Check termination for this agent
+                    agent_x, agent_y = self.vehicles[i, 0], self.vehicles[i, 1]
+                    dest_x, dest_y = self.vehicles[i, 8], self.vehicles[i, 9]
+                    distance_to_dest = np.sqrt((agent_x - dest_x)**2 + (agent_y - dest_y)**2)
+                    
+                    terminated[agent_id] = (distance_to_dest < 0.5 or  # Reached destination
+                                          agent_x < -1 or agent_x > self.grid_size[1] + 1 or  # Left grid
+                                          agent_y < -1 or agent_y > self.grid_size[0] + 1)
+                    
+                    truncated[agent_id] = self.sim_time > 200  # Max episode length
+                    
+                    # Get observation for this agent
+                    observations[agent_id] = self._get_observation(i)
+            
+            return observations, rewards, terminated, truncated, step_info
+            
+        else:
+            # Single-agent mode (original behavior)
+            reward = self._calculate_reward(0)
+            
+            # Add collision penalty to reward based on step_info
+            if step_info.get('actual_collisions'):
+                collision_penalty = 0
+                for collision in step_info['actual_collisions']:
+                    if 0 in collision['vehicles']:  # Agent involved in collision
+                        collision_penalty += 5.0
+                reward -= collision_penalty
+            
+            # Check termination conditions for agent
+            if self.vehicles[0, 6] == 1:  # Agent active
+                agent_x, agent_y = self.vehicles[0, 0], self.vehicles[0, 1]
+                dest_x, dest_y = self.vehicles[0, 8], self.vehicles[0, 9]
+                distance_to_dest = np.sqrt((agent_x - dest_x)**2 + (agent_y - dest_y)**2)
+                
+                terminated = (distance_to_dest < 0.5 or  # Reached destination
+                             agent_x < -1 or agent_x > self.grid_size[1] + 1 or  # Left grid
+                             agent_y < -1 or agent_y > self.grid_size[0] + 1)
+            else:
+                terminated = True  # Agent not active
+            
+            truncated = self.sim_time > 200  # Max episode length
+            
+            observation = self._get_observation(0)
+            
+            return observation, reward, terminated, truncated, step_info
     
     def _apply_action(self, vehicle_id, action):
         """Apply action to a vehicle (maintain pure X or Y axis movement)."""
@@ -221,19 +358,9 @@ class SmartHighwayEnv:
                                                  self.vehicles[vehicle_id, 2] + self.acceleration)
                 self.vehicles[vehicle_id, 3] = 0.0  # Ensure Y velocity stays 0
                 
-            elif direction == 1:  # R2L (X-axis only)
-                self.vehicles[vehicle_id, 2] = max(-self.max_speed, 
-                                                 self.vehicles[vehicle_id, 2] - self.acceleration)
-                self.vehicles[vehicle_id, 3] = 0.0  # Ensure Y velocity stays 0
-                
-            elif direction == 2:  # T2B (Y-axis only)
+            else:  # T2B (Y-axis only)
                 self.vehicles[vehicle_id, 3] = min(self.max_speed, 
                                                  self.vehicles[vehicle_id, 3] + self.acceleration)
-                self.vehicles[vehicle_id, 2] = 0.0  # Ensure X velocity stays 0
-                
-            else:  # B2T (Y-axis only)
-                self.vehicles[vehicle_id, 3] = max(-self.max_speed, 
-                                                 self.vehicles[vehicle_id, 3] - self.acceleration)
                 self.vehicles[vehicle_id, 2] = 0.0  # Ensure X velocity stays 0
                     
         elif action == 2:  # Brake
@@ -243,23 +370,11 @@ class SmartHighwayEnv:
                 if self.vehicles[vehicle_id, 2] < self.min_speed:
                     self.vehicles[vehicle_id, 2] = self.min_speed
                     
-            elif direction == 1:  # R2L
-                self.vehicles[vehicle_id, 2] *= self.brake_factor
-                self.vehicles[vehicle_id, 3] = 0.0  # Ensure Y velocity stays 0
-                if self.vehicles[vehicle_id, 2] > -self.min_speed:
-                    self.vehicles[vehicle_id, 2] = -self.min_speed
-                    
-            elif direction == 2:  # T2B
+            else:  # T2B
                 self.vehicles[vehicle_id, 3] *= self.brake_factor
                 self.vehicles[vehicle_id, 2] = 0.0  # Ensure X velocity stays 0
                 if self.vehicles[vehicle_id, 3] < self.min_speed:
                     self.vehicles[vehicle_id, 3] = self.min_speed
-                    
-            else:  # B2T
-                self.vehicles[vehicle_id, 3] *= self.brake_factor
-                self.vehicles[vehicle_id, 2] = 0.0  # Ensure X velocity stays 0
-                if self.vehicles[vehicle_id, 3] > -self.min_speed:
-                    self.vehicles[vehicle_id, 3] = -self.min_speed
     
     def _handle_6g_communication(self):
         """Handle 6G V2V/V2I communication for intersection management."""
@@ -267,8 +382,61 @@ class SmartHighwayEnv:
         messages_delivered = 0
         intersection_reservations = []
         collisions_prevented = []
+        actual_collisions = []
         
-        # Check vehicles approaching intersections
+        # First, check for actual physical collisions (vehicles occupying same space)
+        for i in range(self.max_vehicles):
+            if self.vehicles[i, 6] == 0:  # Not active
+                continue
+            for j in range(i + 1, self.max_vehicles):
+                if self.vehicles[j, 6] == 0:  # Not active
+                    continue
+                
+                # Check physical proximity (actual collision)
+                x1, y1 = self.vehicles[i, 0], self.vehicles[i, 1]
+                x2, y2 = self.vehicles[j, 0], self.vehicles[j, 1]
+                distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                
+                if distance < 0.5:  # Increased collision detection range
+                    # More detailed collision detection
+                    dir1, dir2 = int(self.vehicles[i, 4]), int(self.vehicles[j, 4])
+                    
+                    # Check for actual collisions
+                    if distance < 0.3:  # Very close - actual collision
+                        actual_collisions.append({
+                            'vehicles': [i, j],
+                            'position': ((x1 + x2) / 2, (y1 + y2) / 2),
+                            'type': 'intersection_collision' if dir1 != dir2 else 'same_lane_collision',
+                            'distance': distance
+                        })
+                        self.collision_count += 1
+                        
+                        # Emergency stop for both vehicles
+                        self.vehicles[i, 2] *= 0.1  # Emergency brake
+                        self.vehicles[i, 3] *= 0.1
+                        self.vehicles[j, 2] *= 0.1
+                        self.vehicles[j, 3] *= 0.1
+                        
+                        if self.debug:
+                            print(f"[COLLISION] Actual collision between vehicles {i} and {j} at distance {distance:.3f}")
+                    
+                    # Near-miss detection (close but not colliding)
+                    elif distance < 0.4 and dir1 != dir2:  # Near miss at intersection
+                        # This should have been prevented by 6G
+                        if not any(collision['vehicles'] == [i, j] or collision['vehicles'] == [j, i] 
+                                 for collision in collisions_prevented):
+                            # 6G system failed to prevent this near miss
+                            actual_collisions.append({
+                                'vehicles': [i, j],
+                                'position': ((x1 + x2) / 2, (y1 + y2) / 2),
+                                'type': 'near_miss_intersection',
+                                'distance': distance
+                            })
+                            
+                            if self.debug:
+                                print(f"[NEAR_MISS] 6G failed to prevent near collision {i}-{j} at distance {distance:.3f}")
+        
+        # Then, handle 6G communication to prevent future collisions
         for i in range(self.max_vehicles):
             if self.vehicles[i, 6] == 0:  # Not active
                 continue
@@ -283,7 +451,7 @@ class SmartHighwayEnv:
                 distance = np.sqrt((x - int_x)**2 + (y - int_y)**2)
                 
                 # If approaching intersection (within communication range)
-                if distance < 2.0:
+                if distance < 2.0 and distance > 0.5:  # Not too close, not too far
                     # Send 6G message for intersection reservation
                     message = {
                         'vehicle_id': i,
@@ -296,19 +464,14 @@ class SmartHighwayEnv:
                     
                     messages_sent += 1
                     
-                    # Process message through 6G system
-                    # Create path based on vehicle direction
+                    # Enhanced 6G intersection management
                     direction = int(self.vehicles[i, 4])
                     if direction == 0:  # L2R
                         path = (3, 1)  # West to East
-                    elif direction == 1:  # R2L
-                        path = (1, 3)  # East to West
-                    elif direction == 2:  # T2B
+                    else:  # T2B
                         path = (0, 2)  # North to South
-                    else:  # B2T
-                        path = (2, 0)  # South to North
                     
-                    duration = 2.0  # Time to cross intersection
+                    duration = 3.0  # Longer crossing time to create more conflicts
                     granted, slot = self.intersection_manager.request_reservation(
                         i, message['arrival_time'], duration, path
                     )
@@ -322,23 +485,62 @@ class SmartHighwayEnv:
                             'slot': slot
                         })
                     else:
-                        # Collision would have occurred - 6G prevented it
+                        # 6G prevented a potential collision - be more aggressive in prevention
                         collisions_prevented.append({
                             'vehicle': i,
                             'intersection': intersection['id'],
                             'reason': 'intersection_occupied',
-                            'suggested_time': slot
+                            'suggested_time': slot,
+                            'prevention_type': '6G_V2I_reservation'
                         })
                         
-                        # Apply emergency braking
-                        self._apply_action(i, 2)  # Brake
+                        # More noticeable collision prevention action
+                        current_speed = np.sqrt(vx**2 + vy**2)
+                        if current_speed > self.min_speed:
+                            # Apply multiple brake actions for stronger effect
+                            self._apply_action(i, 2)  # Brake
+                            if current_speed > 1.5:
+                                self._apply_action(i, 2)  # Double brake for high speeds
+                    
+                    # Additional V2V collision prediction
+                    for j in range(self.max_vehicles):
+                        if j != i and self.vehicles[j, 6] == 1:  # Different active vehicle
+                            x2, y2 = self.vehicles[j, 0], self.vehicles[j, 1]
+                            vx2, vy2 = self.vehicles[j, 2], self.vehicles[j, 3]
+                            
+                            # Predict future collision at intersection
+                            future_time = 3.0  # Look ahead 3 seconds
+                            future_x1 = x + vx * future_time
+                            future_y1 = y + vy * future_time
+                            future_x2 = x2 + vx2 * future_time
+                            future_y2 = y2 + vy2 * future_time
+                            
+                            # Check if both will be at same intersection
+                            predicted_distance = np.sqrt((future_x1 - future_x2)**2 + (future_y1 - future_y2)**2)
+                            if predicted_distance < 1.5:  # Collision predicted
+                                collisions_prevented.append({
+                                    'vehicle': i,
+                                    'other_vehicle': j,
+                                    'intersection': intersection['id'],
+                                    'reason': 'v2v_collision_prediction',
+                                    'prevention_type': '6G_V2V_coordination'
+                                })
+                                
+                                # Coordinate speeds to avoid collision
+                                vehicle_speed = np.sqrt(vx**2 + vy**2)
+                                other_speed = np.sqrt(vx2**2 + vy2**2)
+                                if vehicle_speed > other_speed:
+                                    self._apply_action(i, 2)  # Faster vehicle brakes
+                                else:
+                                    self._apply_action(j, 2)  # Other vehicle brakes
         
         return {
             'messages_sent': messages_sent,
             'messages_delivered': messages_delivered,
             'intersection_reservations': intersection_reservations,
             'collisions_prevented': collisions_prevented,
-            'collisions': []  # No actual collisions due to 6G prevention
+            'actual_collisions': actual_collisions,  # NEW: Track real collisions
+            'collision_prevention_rate': len(collisions_prevented) / max(messages_sent, 1) * 100
         }
     
     def _estimate_arrival_time(self, vehicle_id, intersection):
@@ -398,42 +600,63 @@ class SmartHighwayEnv:
                     status = "reached destination" if reached_dest else "left grid"
                     print(f"[SMART_HIGHWAY] Vehicle {i} {status}")
     
-    def _calculate_reward(self):
-        """Calculate reward for the agent."""
-        # Reward for agent vehicle making progress
-        if self.vehicles[0, 6] == 1:  # Agent active
-            x, y = self.vehicles[0, 0], self.vehicles[0, 1]
-            dest_x, dest_y = self.vehicles[0, 8], self.vehicles[0, 9]
-            distance_to_dest = np.sqrt((x - dest_x)**2 + (y - dest_y)**2)
-            
-            # Higher reward for being closer to destination
-            progress_reward = max(0, 10 - distance_to_dest)
-            
-            # Bonus for maintaining good speed
-            speed = np.sqrt(self.vehicles[0, 2]**2 + self.vehicles[0, 3]**2)
-            speed_reward = speed * 0.5
-            
-            return progress_reward + speed_reward
+    def _calculate_reward(self, vehicle_id=0):
+        """Calculate reward for a specific vehicle with proper scaling for RL training."""
+        if self.vehicles[vehicle_id, 6] == 0:  # Vehicle not active
+            return 0
         
-        return 0  # No reward if agent not active
+        # Vehicle state
+        x, y = self.vehicles[vehicle_id, 0], self.vehicles[vehicle_id, 1]
+        vx, vy = self.vehicles[vehicle_id, 2], self.vehicles[vehicle_id, 3]
+        dest_x, dest_y = self.vehicles[vehicle_id, 8], self.vehicles[vehicle_id, 9]
+        
+        # 1. Progress reward (small incremental reward)
+        distance_to_dest = np.sqrt((x - dest_x)**2 + (y - dest_y)**2)
+        max_distance = np.sqrt(self.grid_size[0]**2 + self.grid_size[1]**2)
+        progress_ratio = 1 - (distance_to_dest / max_distance)
+        progress_reward = progress_ratio * 5.0  # 0-5 points for progress
+        
+        # 2. Speed maintenance reward (encourage consistent movement)
+        speed = np.sqrt(vx**2 + vy**2)
+        if speed > self.min_speed:
+            speed_reward = 1.0  # Reward for moving
+        else:
+            speed_reward = -0.5  # Penalty for being too slow
+        
+        # 3. Step penalty (encourage efficiency)
+        step_penalty = -0.05  # Small penalty per step to encourage faster completion
+        
+        # 4. Destination reached bonus (only when very close)
+        if distance_to_dest < 0.5:
+            goal_bonus = 20.0  # Big bonus for actually reaching destination
+        else:
+            goal_bonus = 0
+        
+        # 5. Collision penalty (from step info)
+        collision_penalty = 0  # Will be added in step function
+        
+        # Total reward (more conservative scaling)
+        total_reward = progress_reward + speed_reward + step_penalty + goal_bonus - collision_penalty
+        
+        return total_reward
     
-    def _get_observation(self):
-        """Get observation for the agent."""
-        if self.vehicles[0, 6] == 0:  # Agent not active
+    def _get_observation(self, vehicle_id=0):
+        """Get observation for a specific vehicle."""
+        if self.vehicles[vehicle_id, 6] == 0:  # Vehicle not active
             return np.zeros(20, dtype=np.float32)
         
-        # Agent vehicle state
-        agent_state = self.vehicles[0, :6]  # x, y, vx, vy, direction, lane_offset
+        # Vehicle state
+        vehicle_state = self.vehicles[vehicle_id, :6]  # x, y, vx, vy, direction, lane_offset
         
         # Nearest vehicles (up to 3)
         other_vehicles = []
-        agent_x, agent_y = self.vehicles[0, 0], self.vehicles[0, 1]
+        vehicle_x, vehicle_y = self.vehicles[vehicle_id, 0], self.vehicles[vehicle_id, 1]
         
         distances = []
-        for i in range(1, self.max_vehicles):
-            if self.vehicles[i, 6] == 1:  # Active
+        for i in range(self.max_vehicles):
+            if i != vehicle_id and self.vehicles[i, 6] == 1:  # Active and not self
                 other_x, other_y = self.vehicles[i, 0], self.vehicles[i, 1]
-                dist = np.sqrt((agent_x - other_x)**2 + (agent_y - other_y)**2)
+                dist = np.sqrt((vehicle_x - other_x)**2 + (vehicle_y - other_y)**2)
                 distances.append((dist, i))
         
         distances.sort()
@@ -445,10 +668,10 @@ class SmartHighwayEnv:
             other_vehicles.extend([0, 0, 0, 0])
         
         # Distance to destination
-        dest_x, dest_y = self.vehicles[0, 8], self.vehicles[0, 9]
-        dest_distance = [dest_x - agent_x, dest_y - agent_y]
+        dest_x, dest_y = self.vehicles[vehicle_id, 8], self.vehicles[vehicle_id, 9]
+        dest_distance = [dest_x - vehicle_x, dest_y - vehicle_y]
         
-        observation = np.concatenate([agent_state, other_vehicles[:12], dest_distance])
+        observation = np.concatenate([vehicle_state, other_vehicles[:12], dest_distance])
         return observation.astype(np.float32)
     
     def get_statistics(self):

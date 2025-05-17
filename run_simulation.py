@@ -101,17 +101,17 @@ def run_smart_city_live():
     subprocess.run(cmd)
 
 def run_smart_highway():
-    """Run smart highway with 6G communication and proper directional lanes (PERFECT!)"""
-    print("🛣️ Starting Smart Highway with 6G Communication and Directional Lanes...")
-    print("Features: X/Y-axis only movement, 6G communication, intersection management, traffic lights ready")
+    """Run smart highway with 6G communication and enhanced multi-lane traffic (PERFECT!)"""
+    print("🛣️ Starting Smart Highway with 6G Communication and Multi-Lane Traffic...")
+    print("Features: 2-direction system, multiple vehicles per lane, clear intersections, 6G communication")
     cmd = [
         "python", "visualizers/smart_highway_visualizer.py",
         "--episodes", "1",
         "--max-steps", "300", 
-        "--delay", "0.12",
+        "--delay", "0.1",
         "--grid-size", "10",
-        "--max-vehicles", "16",
-        "--spawn-rate", "0.4"
+        "--max-vehicles", "24",
+        "--spawn-rate", "0.6"
     ]
     subprocess.run(cmd)
 
