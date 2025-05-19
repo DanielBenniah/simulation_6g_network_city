@@ -28,7 +28,7 @@ class SmartHighwayEnv:
     """Smart highway with 6G communication and proper lane management."""
     
     def __init__(self, grid_size=(10, 10), max_vehicles=24, spawn_rate=0.6, 
-                 multi_agent=False, debug=False):
+                 multi_agent=False, debug=False, enable_6g=True):
         """
         Initialize Smart Highway Environment with optional multi-agent support.
         
@@ -38,12 +38,14 @@ class SmartHighwayEnv:
             spawn_rate: Probability of spawning new vehicles each step
             multi_agent: If True, all vehicles are learning agents; if False, only vehicle 0 learns
             debug: Enable debug output
+            enable_6g: If True, enable 6G communication; if False, disable for comparison
         """
         self.grid_size = grid_size
         self.max_vehicles = max_vehicles
         self.spawn_rate = spawn_rate
         self.multi_agent = multi_agent  # NEW: Multi-agent support
         self.debug = debug
+        self.enable_6g = enable_6g  # NEW: Enable/disable 6G communication
         
         # Agent IDs for multi-agent mode
         self.agent_ids = [f"agent_{i}" for i in range(max_vehicles)] if multi_agent else None
@@ -73,9 +75,13 @@ class SmartHighwayEnv:
         self.acceleration = 0.3
         self.brake_factor = 0.5
         
-        # 6G Communication system
-        self.comm = CommModule()
-        self.intersection_manager = IntersectionManager()
+        # 6G Communication system (only if enabled)
+        if self.enable_6g:
+            self.comm = CommModule()
+            self.intersection_manager = IntersectionManager()
+        else:
+            self.comm = None
+            self.intersection_manager = None
         
         # Define intersections clearly for future traffic light integration
         self.intersections = self._define_intersections()
@@ -159,8 +165,12 @@ class SmartHighwayEnv:
         self.collision_count = 0
         
         # Reset communication systems
-        self.comm = CommModule()
-        self.intersection_manager = IntersectionManager()
+        if self.enable_6g:
+            self.comm = CommModule()
+            self.intersection_manager = IntersectionManager()
+        else:
+            self.comm = None
+            self.intersection_manager = None
         
         # Spawn initial vehicles (more for higher density)
         for _ in range(min(8, self.max_vehicles)):
@@ -378,6 +388,51 @@ class SmartHighwayEnv:
     
     def _handle_6g_communication(self):
         """Handle 6G V2V/V2I communication for intersection management."""
+        if not self.enable_6g:
+            # When 6G is disabled, only do basic collision detection without prevention
+            actual_collisions = []
+            for i in range(self.max_vehicles):
+                if self.vehicles[i, 6] == 0:  # Not active
+                    continue
+                for j in range(i + 1, self.max_vehicles):
+                    if self.vehicles[j, 6] == 0:  # Not active
+                        continue
+                    
+                    # Check physical proximity (actual collision)
+                    x1, y1 = self.vehicles[i, 0], self.vehicles[i, 1]
+                    x2, y2 = self.vehicles[j, 0], self.vehicles[j, 1]
+                    distance = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                    
+                    if distance < 0.3:  # Very close - actual collision
+                        actual_collisions.append({
+                            'vehicles': [i, j],
+                            'position': ((x1 + x2) / 2, (y1 + y2) / 2),
+                            'type': 'collision_no_6g',
+                            'distance': distance
+                        })
+                        self.collision_count += 1
+                        
+                        # Emergency stop for both vehicles
+                        self.vehicles[i, 2] *= 0.1  # Emergency brake
+                        self.vehicles[i, 3] *= 0.1
+                        self.vehicles[j, 2] *= 0.1
+                        self.vehicles[j, 3] *= 0.1
+                        
+                        if self.debug:
+                            print(f"[COLLISION_NO_6G] Collision between vehicles {i} and {j} at distance {distance:.3f}")
+            
+            # Return minimal info when 6G is disabled
+            return {
+                'messages_sent': 0,
+                'messages_delivered': 0,
+                'intersection_reservations': [],
+                'collisions_prevented': [],
+                'actual_collisions': actual_collisions,
+                'collision_prevention_rate': 0.0,
+                '6g_status': 'disabled'
+            }
+        
+        # Original 6G communication code when enabled
         messages_sent = 0
         messages_delivered = 0
         intersection_reservations = []
@@ -540,7 +595,8 @@ class SmartHighwayEnv:
             'intersection_reservations': intersection_reservations,
             'collisions_prevented': collisions_prevented,
             'actual_collisions': actual_collisions,  # NEW: Track real collisions
-            'collision_prevention_rate': len(collisions_prevented) / max(messages_sent, 1) * 100
+            'collision_prevention_rate': len(collisions_prevented) / max(messages_sent, 1) * 100,
+            '6g_status': 'enabled'
         }
     
     def _estimate_arrival_time(self, vehicle_id, intersection):

@@ -1,0 +1,31 @@
+6G COMMUNICATION BENEFITS COMPARISON STUDY
+==================================================
+Generated: 2025-06-23 11:26:04
+
+SCENARIOS TESTED:
+1. Single-agent with 6G communication
+2. Multi-agent with 6G communication
+3. Multi-agent without 6G communication
+
+RESULTS:
+
+SINGLE AGENT 6G:
+  Average Reward: 60.09 ± 37.48
+  Average Collisions: 7.80 ± 3.84
+  Completion Rate: 100.0%
+  6G Messages: 232.2 per episode
+  6G Prevented: 414.5 per episode
+
+MULTI AGENT 6G:
+  Average Reward: 1919.66 ± 160.30
+  Average Collisions: 5.30 ± 3.95
+  Completion Rate: 0.0%
+  6G Messages: 754.3 per episode
+  6G Prevented: 814.2 per episode
+
+MULTI AGENT NO 6G:
+  Average Reward: 1304.52 ± 402.98
+  Average Collisions: 25.90 ± 54.40
+  Completion Rate: 0.0%
+  6G Messages: 0.0 per episode
+  6G Prevented: 0.0 per episode
