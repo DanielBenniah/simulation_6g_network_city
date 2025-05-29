@@ -1,0 +1,43 @@
+TRAFFIC LIGHTS IMPACT ANALYSIS REPORT
+==================================================
+Generated: 2025-06-23 11:39:00
+
+STUDY OVERVIEW:
+This study compares vehicle journey times and traffic efficiency
+with and without traffic light control in smart highway scenarios.
+
+SCENARIOS COMPARED:
+A. Smart Highway WITHOUT Traffic Lights
+B. Smart Highway WITH Traffic Lights
+
+DETAILED RESULTS:
+------------------------------
+
+NO TRAFFIC LIGHTS:
+  Average Journey Time: 15.67 steps
+  Average Wait Time: 0.00 steps per vehicle
+  Collision Rate: 8.40 collisions per 100 steps
+  Completion Rate: 92.92%
+  Total Spawned: 113 vehicles
+  Total Completed: 105 vehicles
+
+WITH TRAFFIC LIGHTS:
+  Average Journey Time: 36.34 steps
+  Average Wait Time: 18.25 steps per vehicle
+  Collision Rate: 105.60 collisions per 100 steps
+  Completion Rate: 83.84%
+  Total Spawned: 99 vehicles
+  Total Completed: 83 vehicles
+
+COMPARATIVE ANALYSIS:
+------------------------------
+Journey Time Impact: +20.67 steps (+131.9%)
+Wait Time Added: 18.25 steps per vehicle
+Safety Improvement: -97.20 fewer collisions per 100 steps
+Completion Rate Change: -9.08%
+
+KEY FINDINGS:
+--------------------
+• Traffic lights increase journey time but may improve safety
+• Traffic light timing optimization can balance efficiency and safety
+• Queue management is critical for traffic light effectiveness

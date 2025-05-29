@@ -1,0 +1,47 @@
+TRAFFIC MANAGEMENT PARADIGMS COMPARISON REPORT
+============================================================
+Generated: 2025-06-23 11:44:31
+
+STUDY OVERVIEW:
+This study compares two competing traffic management paradigms:
+1. Traditional Traffic Lights (vehicles wait at red lights)
+2. 6G Smart Communication (vehicles coordinate in real-time)
+
+PARADIGMS COMPARED:
+A. Traffic Lights: Fixed timing, vehicles queue and wait
+B. 6G Smart: Dynamic coordination, no fixed infrastructure
+
+DETAILED RESULTS:
+----------------------------------------
+
+TRAFFIC LIGHTS PARADIGM:
+  Average Journey Time: 64.80 steps
+  Average Wait Time: 96.52 steps per vehicle
+  Collision Rate: 2500.40 per 100 steps
+  Completion Rate: 23.81%
+  Traffic Efficiency: 50.5%
+  Total Spawned: 21 vehicles
+  Total Completed: 5 vehicles
+
+6G SMART PARADIGM:
+  Average Journey Time: 16.30 steps
+  Average Wait Time: 0.00 steps per vehicle
+  Collision Rate: 21.20 per 100 steps
+  Completion Rate: 94.50%
+  Traffic Efficiency: 100.0%
+  Total Spawned: 109 vehicles
+  Total Completed: 103 vehicles
+
+COMPARATIVE ANALYSIS:
+------------------------------
+Journey Time Difference: +48.50 steps (6G is 74.8% faster)
+Wait Time Eliminated: 96.52 steps per vehicle (6G advantage)
+Safety Improvement: +2479.20 collision rate difference
+Efficiency Improvement: +49.5% (6G advantage)
+
+KEY FINDINGS:
+--------------------
+• 6G paradigm eliminates waiting time entirely
+• Real-time coordination vs fixed scheduling trade-offs
+• Infrastructure cost differences (lights vs communication)
+• Scalability and adaptability considerations

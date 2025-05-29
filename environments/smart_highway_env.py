@@ -28,7 +28,7 @@ class SmartHighwayEnv:
     """Smart highway with 6G communication and proper lane management."""
     
     def __init__(self, grid_size=(10, 10), max_vehicles=24, spawn_rate=0.6, 
-                 multi_agent=False, debug=False, enable_6g=True):
+                 multi_agent=False, debug=False, enable_6g=True, enable_traffic_lights=False):
         """
         Initialize Smart Highway Environment with optional multi-agent support.
         
@@ -39,6 +39,7 @@ class SmartHighwayEnv:
             multi_agent: If True, all vehicles are learning agents; if False, only vehicle 0 learns
             debug: Enable debug output
             enable_6g: If True, enable 6G communication; if False, disable for comparison
+            enable_traffic_lights: If True, enable traffic light control and queuing
         """
         self.grid_size = grid_size
         self.max_vehicles = max_vehicles
@@ -46,6 +47,7 @@ class SmartHighwayEnv:
         self.multi_agent = multi_agent  # NEW: Multi-agent support
         self.debug = debug
         self.enable_6g = enable_6g  # NEW: Enable/disable 6G communication
+        self.enable_traffic_lights = enable_traffic_lights  # NEW: Enable/disable traffic lights
         
         # Agent IDs for multi-agent mode
         self.agent_ids = [f"agent_{i}" for i in range(max_vehicles)] if multi_agent else None
@@ -86,6 +88,12 @@ class SmartHighwayEnv:
         # Define intersections clearly for future traffic light integration
         self.intersections = self._define_intersections()
         
+        # Traffic light timing parameters
+        if self.enable_traffic_lights:
+            self.light_cycle_duration = 20.0  # Total cycle time in simulation steps
+            self.yellow_duration = 3.0  # Yellow light duration
+            self.green_duration = (self.light_cycle_duration - 2 * self.yellow_duration) / 2  # Green for each direction
+        
         # Simulation state
         self.sim_time = 0
         self.vehicle_spawn_times = {}
@@ -93,6 +101,8 @@ class SmartHighwayEnv:
         self.total_spawned = 0
         self.total_completed = 0
         self.collision_count = 0
+        self.queued_vehicles = []  # Track vehicles waiting at red lights
+        self.total_wait_time = 0  # Track total waiting time for traffic lights
         
     def _define_intersections(self):
         """Define major intersections clearly for traffic light integration."""
@@ -163,6 +173,8 @@ class SmartHighwayEnv:
         self.total_spawned = 0
         self.total_completed = 0
         self.collision_count = 0
+        self.queued_vehicles = []  # Track vehicles waiting at red lights
+        self.total_wait_time = 0  # Track total waiting time for traffic lights
         
         # Reset communication systems
         if self.enable_6g:
@@ -276,7 +288,12 @@ class SmartHighwayEnv:
         # 6G Communication phase
         step_info = self._handle_6g_communication()
         
-        # Move vehicles
+        # Update traffic lights if enabled
+        if self.enable_traffic_lights:
+            self._update_traffic_lights()
+            step_info['traffic_lights'] = self.get_traffic_light_states()
+        
+        # Move vehicles (respecting traffic lights if enabled)
         self._move_vehicles()
         
         # Check for arrivals and departures
@@ -285,6 +302,11 @@ class SmartHighwayEnv:
         # Spawn new vehicles
         if np.random.random() < self.spawn_rate:
             self._spawn_vehicle()
+        
+        # Add traffic light statistics to step_info
+        if self.enable_traffic_lights:
+            step_info['queued_vehicles'] = len(self.queued_vehicles)
+            step_info['total_wait_time'] = self.total_wait_time
         
         # Calculate rewards for all vehicles
         if self.multi_agent:
@@ -619,6 +641,20 @@ class SmartHighwayEnv:
             if self.vehicles[i, 6] == 0:  # Not active
                 continue
                 
+            # Check traffic light restrictions if enabled
+            if self.enable_traffic_lights:
+                if not self._can_proceed_through_intersection(i):
+                    # Vehicle must stop - add to queue and brake
+                    if i not in self.queued_vehicles:
+                        self.queued_vehicles.append(i)
+                    self._apply_action(i, 2)  # Brake
+                    self.total_wait_time += 1
+                    continue
+                else:
+                    # Vehicle can proceed - remove from queue if it was there
+                    if i in self.queued_vehicles:
+                        self.queued_vehicles.remove(i)
+            
             # Update position - ONLY in the direction the vehicle is traveling
             # NO diagonal movement - vehicles move ONLY in X-axis OR Y-axis
             self.vehicles[i, 0] += self.vehicles[i, 2]  # x += vx
@@ -626,6 +662,72 @@ class SmartHighwayEnv:
             
             # Lane offset is ONLY for visualization in the visualizer
             # Do NOT modify actual vehicle position here
+    
+    def _update_traffic_lights(self):
+        """Update traffic light states based on timing cycle."""
+        for intersection in self.intersections:
+            # Calculate current phase based on simulation time
+            cycle_time = self.sim_time % self.light_cycle_duration
+            
+            if cycle_time < self.green_duration:
+                # Green for horizontal traffic (L2R)
+                intersection['traffic_light']['current_state'] = 'green_horizontal'
+            elif cycle_time < self.green_duration + self.yellow_duration:
+                # Yellow for horizontal traffic
+                intersection['traffic_light']['current_state'] = 'yellow_horizontal'
+            elif cycle_time < 2 * self.green_duration + self.yellow_duration:
+                # Green for vertical traffic (T2B)
+                intersection['traffic_light']['current_state'] = 'green_vertical'
+            else:
+                # Yellow for vertical traffic
+                intersection['traffic_light']['current_state'] = 'yellow_vertical'
+    
+    def _can_proceed_through_intersection(self, vehicle_id):
+        """Check if a vehicle can proceed through nearby intersections based on traffic lights."""
+        x, y = self.vehicles[vehicle_id, 0], self.vehicles[vehicle_id, 1]
+        direction = int(self.vehicles[vehicle_id, 4])
+        
+        # Check all intersections
+        for intersection in self.intersections:
+            int_x, int_y = intersection['position']
+            distance = np.sqrt((x - int_x)**2 + (y - int_y)**2)
+            
+            # If vehicle is approaching intersection (within 1.5 units)
+            if distance < 1.5:
+                light_state = intersection['traffic_light']['current_state']
+                
+                # Check if vehicle's direction has green light
+                if direction == 0:  # L2R (Horizontal)
+                    if light_state in ['green_horizontal']:
+                        return True
+                    elif light_state in ['yellow_horizontal']:
+                        # Allow if very close to intersection (already committed)
+                        return distance < 0.8
+                    else:  # Red or green for opposite direction
+                        return False
+                        
+                else:  # T2B (Vertical)
+                    if light_state in ['green_vertical']:
+                        return True
+                    elif light_state in ['yellow_vertical']:
+                        # Allow if very close to intersection (already committed)
+                        return distance < 0.8
+                    else:  # Red or green for opposite direction
+                        return False
+        
+        # No nearby intersection restrictions
+        return True
+    
+    def get_traffic_light_states(self):
+        """Get current traffic light states for all intersections."""
+        light_states = {}
+        for intersection in self.intersections:
+            light_states[intersection['id']] = {
+                'state': intersection['traffic_light']['current_state'],
+                'position': intersection['position'],
+                'cycle_time': self.sim_time % self.light_cycle_duration
+            }
+        return light_states
     
     def _check_arrivals(self):
         """Check if vehicles have reached their destinations."""
@@ -731,32 +833,42 @@ class SmartHighwayEnv:
         return observation.astype(np.float32)
     
     def get_statistics(self):
-        """Get journey and traffic statistics."""
+        """Get comprehensive simulation statistics including traffic light data."""
         active_vehicles = int(np.sum(self.vehicles[:, 6]))
+        avg_journey_time = np.mean(self.journey_times) if self.journey_times else 0
         
         stats = {
-            'active_vehicles': active_vehicles,
+            'simulation_time': self.sim_time,
             'total_spawned': self.total_spawned,
             'total_completed': self.total_completed,
+            'active_vehicles': active_vehicles,
+            'completion_rate': (self.total_completed / max(self.total_spawned, 1)) * 100,
             'collision_count': self.collision_count,
-            'intersections': len(self.intersections)
+            'collision_rate': self.collision_count / max(self.sim_time, 1) * 100,
+            'avg_journey_time': avg_journey_time,
+            'journey_times': self.journey_times.copy(),
+            'traffic_light_enabled': self.enable_traffic_lights,
+            '6g_enabled': self.enable_6g
         }
         
-        if self.journey_times:
+        # Add traffic light specific statistics
+        if self.enable_traffic_lights:
             stats.update({
-                'avg_journey_time': np.mean(self.journey_times),
-                'min_journey_time': np.min(self.journey_times),
-                'max_journey_time': np.max(self.journey_times),
-                'efficiency': (self.total_completed / max(self.total_spawned, 1)) * 100
+                'queued_vehicles': len(self.queued_vehicles),
+                'total_wait_time': self.total_wait_time,
+                'avg_wait_time_per_vehicle': self.total_wait_time / max(self.total_spawned, 1),
+                'current_light_states': self.get_traffic_light_states(),
+                'traffic_efficiency': max(0, 100 - (self.total_wait_time / max(self.sim_time * active_vehicles, 1) * 100))
             })
         else:
             stats.update({
-                'avg_journey_time': 0,
-                'min_journey_time': 0,
-                'max_journey_time': 0,
-                'efficiency': 0
+                'queued_vehicles': 0,
+                'total_wait_time': 0,
+                'avg_wait_time_per_vehicle': 0,
+                'current_light_states': {},
+                'traffic_efficiency': 100  # No waiting without traffic lights
             })
-        
+            
         return stats
     
     def get_intersection_info(self):
